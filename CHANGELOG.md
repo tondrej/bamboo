@@ -1,3 +1,12 @@
+## [0.5.8] - 2026-05-22
+
+### 🐛 Bug Fixes
+
+- *(theme)* Correct portfolio hero negative margin top
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to v0.5.8
 ## [0.5.7] - 2026-05-16
 
 ### 🐛 Bug Fixes
@@ -7,6 +16,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Bump version to v0.5.7
+- Update changelog for v0.5.7
 ## [0.5.6] - 2026-05-16
 
 ### 🐛 Bug Fixes
