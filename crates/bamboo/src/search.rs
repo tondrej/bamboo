@@ -160,7 +160,7 @@ pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
             url: post.content.url.clone(),
             tags: post.tags.clone(),
             date: post.date.format("%Y-%m-%d").to_string(),
-            excerpt: post.excerpt.clone().unwrap_or_default(),
+            excerpt: post.content.excerpt.clone().unwrap_or_default(),
             content: truncate_content(
                 &strip_html_tags(&post.content.html),
                 MAX_SEARCH_CONTENT_CHARS,

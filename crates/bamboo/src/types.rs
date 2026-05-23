@@ -176,9 +176,6 @@ pub struct Content {
     /// authors can write `{{ post.content | safe }}`.
     #[serde(rename = "content")]
     pub html: String,
-    /// Raw markdown source before rendering. Not serialized.
-    #[serde(skip_serializing)]
-    pub raw_content: String,
     /// Parsed frontmatter, preserving every field for template access.
     pub frontmatter: Frontmatter,
     /// Absolute path of the source file on disk.
@@ -202,6 +199,10 @@ pub struct Content {
     /// `/posts/hello/`).
     #[serde(default)]
     pub url: String,
+    /// Custom excerpt or auto-derived first paragraph. `None` when there is
+    /// no body to summarise.
+    #[serde(default)]
+    pub excerpt: Option<String>,
 }
 
 /// A non-post page: either the home page (`_index.md`) or any top-level /
@@ -229,10 +230,6 @@ pub struct Post {
     /// Publication date, parsed from frontmatter or the filename prefix
     /// (e.g. `2024-01-15-hello.md`).
     pub date: DateTime<Utc>,
-    /// Custom excerpt. Auto-derived from the first paragraph when the
-    /// `excerpt` frontmatter field is absent.
-    #[serde(default)]
-    pub excerpt: Option<String>,
     /// If `true`, excluded from build output unless `--drafts` is passed.
     #[serde(default)]
     pub draft: bool,

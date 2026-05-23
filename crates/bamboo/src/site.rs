@@ -9,23 +9,22 @@ use crate::parsing::{
 };
 use crate::search::strip_html_tags;
 use crate::shortcodes::ShortcodeProcessor;
+use crate::site_data::{collect_assets, load_data};
+use crate::site_refs::build_ref_registry;
 use crate::types::{
-    Asset, Collection, CollectionItem, Content, Page, Post, Site, SiteConfig, TaxonomyDefinition,
+    Collection, CollectionItem, Content, Page, Post, Site, SiteConfig, TaxonomyDefinition,
 };
 use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
 use rayon::prelude::*;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-const MAX_DATA_DEPTH: usize = 10;
-
 struct ContentInput {
     slug: String,
     title: String,
-    raw_content: String,
+    excerpt: Option<String>,
     rendered: crate::parsing::RenderedMarkdown,
     frontmatter: crate::types::Frontmatter,
     output_path: PathBuf,
@@ -129,7 +128,13 @@ impl SiteBuilder {
             self.shortcode_processor = Some(ShortcodeProcessor::new(&dirs)?);
         }
 
-        let ref_registry = self.build_ref_registry()?;
+        let content_dir = self.input_dir.join("content");
+        let reserved_dirs = if content_dir.exists() {
+            self.find_reserved_dirs(&content_dir)?
+        } else {
+            Vec::new()
+        };
+        let ref_registry = build_ref_registry(&self.input_dir, &reserved_dirs)?;
         if let Some(ref mut processor) = self.shortcode_processor {
             processor.register_builtin_default_partials()?;
             if let Some(ref theme_templates) = self.theme_templates_dir {
@@ -146,8 +151,8 @@ impl SiteBuilder {
         let (home, mut pages) = self.load_pages()?;
         let posts = self.load_posts(&config.taxonomies)?;
         let mut collections = self.load_collections()?;
-        let data = self.load_data()?;
-        let assets = self.collect_assets()?;
+        let data = load_data(&self.input_dir)?;
+        let assets = collect_assets(&self.input_dir)?;
 
         pages.sort_by(|a, b| {
             a.content
@@ -321,163 +326,6 @@ impl SiteBuilder {
             .render(content)
     }
 
-    fn build_ref_registry(&self) -> Result<HashMap<String, String>> {
-        let content_dir = self.input_dir.join("content");
-        let mut registry = HashMap::new();
-
-        if !content_dir.exists() {
-            return Ok(registry);
-        }
-
-        let reserved_dirs = self.find_reserved_dirs(&content_dir)?;
-
-        for entry in WalkDir::new(&content_dir).min_depth(1).into_iter() {
-            let entry = entry.map_err(|error| BambooError::WalkDir {
-                path: content_dir.clone(),
-                message: error.to_string(),
-            })?;
-
-            let path = entry.path();
-
-            if !path.is_file() {
-                continue;
-            }
-
-            if path
-                .extension()
-                .map(|extension| extension != "md")
-                .unwrap_or(true)
-            {
-                continue;
-            }
-
-            let filename = path.file_name().unwrap().to_string_lossy();
-            if filename.starts_with('_') && filename != "_index.md" {
-                continue;
-            }
-
-            let relative =
-                path.strip_prefix(&content_dir)
-                    .map_err(|_| BambooError::InvalidPath {
-                        path: path.to_path_buf(),
-                    })?;
-
-            let relative_str = relative.to_string_lossy().replace('\\', "/");
-
-            let parent_dir = path.parent().unwrap_or(path);
-            let is_in_posts = parent_dir
-                .strip_prefix(&content_dir)
-                .map(|relative_parent| {
-                    relative_parent
-                        .components()
-                        .next()
-                        .map(|component| component.as_os_str() == "posts")
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-
-            let is_in_collection = reserved_dirs
-                .iter()
-                .any(|reserved| parent_dir.starts_with(reserved) && !is_in_posts);
-
-            let url = if filename == "_index.md"
-                && relative
-                    .parent()
-                    .map(|parent| parent == Path::new(""))
-                    .unwrap_or(true)
-            {
-                "/".to_string()
-            } else if is_in_posts {
-                let (_, slug) =
-                    if let Some(parsed) = crate::parsing::parse_date_from_filename(&filename) {
-                        parsed
-                    } else {
-                        (
-                            String::new(),
-                            filename
-                                .strip_suffix(".md")
-                                .unwrap_or(&filename)
-                                .to_string(),
-                        )
-                    };
-                format!("/posts/{}/", slug)
-            } else if is_in_collection {
-                let relative_to_content = path
-                    .strip_prefix(&content_dir)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let collection_name = relative_to_content.split('/').next().unwrap_or("");
-                let within_collection = path
-                    .strip_prefix(content_dir.join(collection_name))
-                    .unwrap_or(path);
-                let file_slug = filename
-                    .strip_suffix(".md")
-                    .unwrap_or(&filename)
-                    .to_string();
-                let nested_dir = within_collection.parent().unwrap_or(Path::new(""));
-                let slug = if nested_dir == Path::new("") {
-                    file_slug
-                } else {
-                    let dir_part = nested_dir.to_string_lossy().replace('\\', "/");
-                    format!("{}/{}", dir_part, file_slug)
-                };
-                format!("/{}/{}/", collection_name, slug)
-            } else {
-                let relative_dir = relative.parent().unwrap_or(Path::new(""));
-                let file_slug = if filename == "_index.md" {
-                    "index".to_string()
-                } else {
-                    filename
-                        .strip_suffix(".md")
-                        .unwrap_or(&filename)
-                        .to_string()
-                };
-
-                let slug = if relative_dir == Path::new("") {
-                    file_slug.clone()
-                } else {
-                    let dir_part = relative_dir.to_string_lossy().replace('\\', "/");
-                    if file_slug == "index" {
-                        dir_part.to_string()
-                    } else {
-                        format!("{}/{}", dir_part, file_slug)
-                    }
-                };
-
-                if slug == "index" {
-                    "/".to_string()
-                } else {
-                    format!("/{}/", slug)
-                }
-            };
-
-            let url = if let Ok(file_content) = fs::read_to_string(path)
-                && let Ok((frontmatter, _)) = extract_frontmatter(&file_content, path)
-                && let Some(permalink) = frontmatter.get_string("permalink")
-            {
-                let clean = permalink.trim_matches('/');
-                if clean.is_empty() {
-                    "/".to_string()
-                } else {
-                    format!("/{}/", clean)
-                }
-            } else {
-                url
-            };
-
-            registry.insert(relative_str.clone(), url.clone());
-            registry.insert(filename.to_string(), url.clone());
-
-            let without_extension = relative_str.strip_suffix(".md").unwrap_or(&relative_str);
-            if without_extension != relative_str {
-                registry.insert(without_extension.to_string(), url.clone());
-            }
-        }
-
-        Ok(registry)
-    }
-
     fn apply_permalink(
         frontmatter: &crate::types::Frontmatter,
         url: &mut String,
@@ -504,7 +352,6 @@ impl SiteBuilder {
             slug: input.slug,
             title: input.title,
             html: input.rendered.html,
-            raw_content: input.raw_content,
             frontmatter: input.frontmatter,
             path: input.output_path,
             template,
@@ -513,6 +360,7 @@ impl SiteBuilder {
             reading_time: reading_time(words),
             toc: input.rendered.toc,
             url: input.url,
+            excerpt: input.excerpt,
         }
     }
 
@@ -572,10 +420,14 @@ impl SiteBuilder {
 
         Self::apply_permalink(&frontmatter, &mut url, &mut output_path);
 
+        let excerpt = frontmatter
+            .get_string("excerpt")
+            .or_else(|| extract_excerpt(&raw_content, 200));
+
         let content = self.build_content(ContentInput {
             slug,
             title,
-            raw_content,
+            excerpt,
             rendered,
             frontmatter,
             output_path,
@@ -709,7 +561,7 @@ impl SiteBuilder {
         let content = self.build_content(ContentInput {
             slug,
             title,
-            raw_content,
+            excerpt,
             rendered,
             frontmatter,
             output_path,
@@ -719,7 +571,6 @@ impl SiteBuilder {
         Ok(Post {
             content,
             date,
-            excerpt,
             draft,
             tags,
             categories,
@@ -849,10 +700,14 @@ impl SiteBuilder {
 
         Self::apply_permalink(&frontmatter, &mut url, &mut output_path);
 
+        let excerpt = frontmatter
+            .get_string("excerpt")
+            .or_else(|| extract_excerpt(&raw_content, 200));
+
         let content = self.build_content(ContentInput {
             slug,
             title,
-            raw_content,
+            excerpt,
             rendered,
             frontmatter,
             output_path,
@@ -862,196 +717,6 @@ impl SiteBuilder {
         Ok(CollectionItem { content })
     }
 
-    fn load_data(&self) -> Result<HashMap<String, Value>> {
-        let data_dir = self.input_dir.join("data");
-        let mut data = HashMap::new();
-
-        if !data_dir.exists() {
-            return Ok(data);
-        }
-
-        for entry in WalkDir::new(&data_dir)
-            .min_depth(1)
-            .max_depth(MAX_DATA_DEPTH)
-            .into_iter()
-        {
-            let entry = entry.map_err(|error| BambooError::WalkDir {
-                path: data_dir.clone(),
-                message: error.to_string(),
-            })?;
-
-            let path = entry.path();
-
-            if !path.is_file() {
-                continue;
-            }
-
-            let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-
-            if !["toml", "yaml", "yml", "json"].contains(&extension) {
-                continue;
-            }
-
-            let relative = path
-                .strip_prefix(&data_dir)
-                .map_err(|_| BambooError::InvalidPath {
-                    path: path.to_path_buf(),
-                })?;
-
-            let content = fs::read_to_string(path).io_context("reading data file", path)?;
-
-            let value: Value = match extension {
-                "toml" => toml::from_str(&content).map_err(|error| BambooError::TomlParse {
-                    path: path.to_path_buf(),
-                    message: error.to_string(),
-                })?,
-                "yaml" | "yml" => {
-                    serde_yml::from_str(&content).map_err(|error| BambooError::YamlParse {
-                        path: path.to_path_buf(),
-                        message: error.to_string(),
-                    })?
-                }
-                "json" => {
-                    serde_json::from_str(&content).map_err(|error| BambooError::JsonParse {
-                        path: path.to_path_buf(),
-                        message: error.to_string(),
-                    })?
-                }
-                _ => continue,
-            };
-
-            let key = build_data_key(relative);
-            insert_nested_value(&mut data, &key, value);
-        }
-
-        Ok(data)
-    }
-
-    fn collect_assets(&self) -> Result<Vec<Asset>> {
-        let static_dir = self.input_dir.join("static");
-        let mut assets = Vec::new();
-
-        if !static_dir.exists() {
-            return Ok(assets);
-        }
-
-        for entry in WalkDir::new(&static_dir).min_depth(1).into_iter() {
-            let entry = entry.map_err(|error| BambooError::WalkDir {
-                path: static_dir.clone(),
-                message: error.to_string(),
-            })?;
-
-            let path = entry.path();
-
-            if !path.is_file() {
-                continue;
-            }
-
-            let relative = path.strip_prefix(&static_dir).unwrap();
-
-            assets.push(Asset {
-                source: path.to_path_buf(),
-                dest: relative.to_path_buf(),
-            });
-        }
-
-        Ok(assets)
-    }
-}
-
-fn build_data_key(path: &Path) -> Vec<String> {
-    let mut parts: Vec<String> = path
-        .parent()
-        .map(|parent| {
-            parent
-                .iter()
-                .map(|segment| segment.to_string_lossy().to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if let Some(stem) = path.file_stem() {
-        parts.push(stem.to_string_lossy().to_string());
-    }
-
-    parts
-}
-
-trait NestedInsert {
-    fn get_value(&self, key: &str) -> Option<&Value>;
-    fn get_value_mut(&mut self, key: &str) -> Option<&mut Value>;
-    fn insert_value(&mut self, key: String, value: Value);
-    fn entry_or_insert(&mut self, key: String) -> &mut Value;
-}
-
-impl NestedInsert for HashMap<String, Value> {
-    fn get_value(&self, key: &str) -> Option<&Value> {
-        self.get(key)
-    }
-    fn get_value_mut(&mut self, key: &str) -> Option<&mut Value> {
-        self.get_mut(key)
-    }
-    fn insert_value(&mut self, key: String, value: Value) {
-        self.insert(key, value);
-    }
-    fn entry_or_insert(&mut self, key: String) -> &mut Value {
-        self.entry(key)
-            .or_insert_with(|| Value::Object(serde_json::Map::new()))
-    }
-}
-
-impl NestedInsert for serde_json::Map<String, Value> {
-    fn get_value(&self, key: &str) -> Option<&Value> {
-        self.get(key)
-    }
-    fn get_value_mut(&mut self, key: &str) -> Option<&mut Value> {
-        self.get_mut(key)
-    }
-    fn insert_value(&mut self, key: String, value: Value) {
-        self.insert(key, value);
-    }
-    fn entry_or_insert(&mut self, key: String) -> &mut Value {
-        self.entry(key)
-            .or_insert_with(|| Value::Object(serde_json::Map::new()))
-    }
-}
-
-fn insert_nested_value<M: NestedInsert>(container: &mut M, keys: &[String], value: Value) {
-    if keys.is_empty() {
-        return;
-    }
-
-    if keys.len() == 1 {
-        if let Some(existing) = container.get_value(&keys[0])
-            && existing.is_object()
-        {
-            if let Value::Object(new_map) = &value
-                && let Some(existing_map) = container
-                    .get_value_mut(&keys[0])
-                    .and_then(|v| v.as_object_mut())
-            {
-                for (key, val) in new_map {
-                    existing_map.insert(key.clone(), val.clone());
-                }
-            }
-            return;
-        }
-        container.insert_value(keys[0].clone(), value);
-        return;
-    }
-
-    let first = &keys[0];
-    let rest = &keys[1..];
-
-    let nested = container.entry_or_insert(first.clone());
-
-    if !nested.is_object() {
-        return;
-    }
-
-    if let Value::Object(map) = nested {
-        insert_nested_value(map, rest, value);
-    }
 }
 
 #[cfg(test)]
@@ -1152,8 +817,14 @@ Second paragraph."#,
         let site = builder.build().unwrap();
 
         let post = &site.posts[0];
-        assert!(post.excerpt.is_some());
-        assert!(post.excerpt.as_ref().unwrap().contains("First paragraph"));
+        assert!(post.content.excerpt.is_some());
+        assert!(
+            post.content
+                .excerpt
+                .as_ref()
+                .unwrap()
+                .contains("First paragraph")
+        );
     }
 
     #[test]
@@ -1480,7 +1151,9 @@ url = "/"
         .unwrap();
 
         let builder = SiteBuilder::new(dir.path());
-        let registry = builder.build_ref_registry().unwrap();
+        let content_dir = dir.path().join("content");
+        let reserved = builder.find_reserved_dirs(&content_dir).unwrap();
+        let registry = build_ref_registry(dir.path(), &reserved).unwrap();
 
         assert_eq!(registry.get("about.md").unwrap(), "/about-me/");
         assert_eq!(registry.get("about").unwrap(), "/about-me/");
@@ -1496,7 +1169,9 @@ url = "/"
         .unwrap();
 
         let builder = SiteBuilder::new(dir.path());
-        let registry = builder.build_ref_registry().unwrap();
+        let content_dir = dir.path().join("content");
+        let reserved = builder.find_reserved_dirs(&content_dir).unwrap();
+        let registry = build_ref_registry(dir.path(), &reserved).unwrap();
 
         assert_eq!(registry.get("2024-01-15-hello.md").unwrap(), "/blog/hello/");
     }

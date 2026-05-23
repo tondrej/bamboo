@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::parsing::slugify;
-use crate::theme::SiteMetadata;
+use crate::theme_render::SiteMetadata;
 use crate::types::Site;
 use rayon::prelude::*;
 use serde::Serialize;

@@ -44,9 +44,13 @@ pub mod redirects;
 pub mod search;
 pub mod shortcodes;
 pub mod site;
+pub(crate) mod site_data;
+pub(crate) mod site_refs;
 pub mod sitemap;
 pub(crate) mod taxonomy;
 pub mod theme;
+pub(crate) mod theme_filters;
+pub(crate) mod theme_render;
 pub mod types;
 pub mod xml;
 

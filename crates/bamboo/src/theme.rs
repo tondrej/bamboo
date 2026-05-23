@@ -6,17 +6,19 @@ use crate::assets::AssetConfig;
 use crate::error::Result;
 use crate::feeds;
 use crate::images;
-use crate::parsing::slugify;
 use crate::redirects;
 use crate::search;
 use crate::sitemap;
-use crate::types::{Asset, Site};
+use crate::theme_filters::register_custom_filters;
+use crate::theme_render::{
+    copy_assets, render_404, render_collection, render_index, render_page, render_pagination,
+    render_post, render_search, site_metadata,
+};
+use crate::types::Site;
 use rayon::prelude::*;
-use serde::Serialize;
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tera::{Context, Tera};
+use tera::Tera;
 use walkdir::WalkDir;
 
 const DEFAULT_BASE_TEMPLATE: &str = include_str!("../themes/default/templates/base.html");
@@ -76,60 +78,6 @@ const DEFAULT_PAGE_EDIT_LINK_PARTIAL: &str =
     include_str!("../themes/default/templates/partials/page_edit_link.html");
 const DEFAULT_SEARCH_TEMPLATE: &str = include_str!("../themes/default/templates/search.html");
 const DEFAULT_STYLESHEET: &str = include_str!("../themes/default/static/style.css");
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct SiteMetadata<'a> {
-    config: &'a crate::types::SiteConfig,
-    pages: &'a [crate::types::Page],
-    posts: &'a [crate::types::Post],
-    data: &'a HashMap<String, serde_json::Value>,
-    collections: &'a HashMap<String, crate::types::Collection>,
-}
-
-fn related_posts<'a>(
-    site: &'a Site,
-    post: &crate::types::Post,
-    limit: usize,
-) -> Vec<&'a crate::types::Post> {
-    if post.tags.is_empty() && post.categories.is_empty() {
-        return Vec::new();
-    }
-    let mut scored: Vec<(usize, &crate::types::Post)> = site
-        .posts
-        .iter()
-        .filter(|candidate| candidate.content.slug != post.content.slug)
-        .map(|candidate| {
-            let shared_tags = candidate
-                .tags
-                .iter()
-                .filter(|tag| post.tags.contains(tag))
-                .count();
-            let shared_categories = candidate
-                .categories
-                .iter()
-                .filter(|category| post.categories.contains(category))
-                .count();
-            (shared_tags + shared_categories, candidate)
-        })
-        .filter(|(score, _)| *score > 0)
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.date.cmp(&a.1.date)));
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(_, candidate)| candidate)
-        .collect()
-}
-
-pub(crate) fn site_metadata(site: &Site) -> SiteMetadata<'_> {
-    SiteMetadata {
-        config: &site.config,
-        pages: &site.pages,
-        posts: &site.posts,
-        data: &site.data,
-        collections: &site.collections,
-    }
-}
 
 /// Renders a loaded [`Site`] to disk using Tera templates from a theme.
 ///
@@ -346,14 +294,14 @@ impl ThemeEngine {
         if render_all
             || targets.is_some_and(|t| should_render(t, &RenderTarget::Page("index".to_string())))
         {
-            self.render_index(site, output_dir)?;
+            render_index(&self.tera, site, output_dir)?;
         }
 
         if render_all {
             site.pages
                 .par_iter()
                 .filter(|page| page.content.slug != "404")
-                .try_for_each(|page| self.render_page(site, page, output_dir))?;
+                .try_for_each(|page| render_page(&self.tera, site, page, output_dir))?;
         } else if let Some(target_set) = targets
             && should_render_any_page(target_set)
         {
@@ -363,7 +311,7 @@ impl ThemeEngine {
                     page.content.slug != "404"
                         && should_render(target_set, &RenderTarget::Page(page.content.slug.clone()))
                 })
-                .try_for_each(|page| self.render_page(site, page, output_dir))?;
+                .try_for_each(|page| render_page(&self.tera, site, page, output_dir))?;
         }
 
         let post_tuples: Vec<_> = site
@@ -389,7 +337,7 @@ impl ThemeEngine {
             post_tuples
                 .par_iter()
                 .try_for_each(|(post, prev_post, next_post)| {
-                    self.render_post(site, post, *prev_post, *next_post, output_dir)
+                    render_post(&self.tera, site, post, *prev_post, *next_post, output_dir)
                 })?;
         } else if let Some(target_set) = targets
             && should_render_any_post(target_set)
@@ -400,7 +348,7 @@ impl ThemeEngine {
                     should_render(target_set, &RenderTarget::Post(post.content.slug.clone()))
                 })
                 .try_for_each(|(post, prev_post, next_post)| {
-                    self.render_post(site, post, *prev_post, *next_post, output_dir)
+                    render_post(&self.tera, site, post, *prev_post, *next_post, output_dir)
                 })?;
         }
 
@@ -408,7 +356,7 @@ impl ThemeEngine {
             site.collections
                 .par_iter()
                 .try_for_each(|(name, collection)| {
-                    self.render_collection(site, name, collection, output_dir)
+                    render_collection(&self.tera, site, name, collection, output_dir)
                 })?;
         } else if let Some(target_set) = targets
             && should_render_any_collection(target_set)
@@ -419,12 +367,12 @@ impl ThemeEngine {
                     should_render(target_set, &RenderTarget::Collection(name.to_string()))
                 })
                 .try_for_each(|(name, collection)| {
-                    self.render_collection(site, name, collection, output_dir)
+                    render_collection(&self.tera, site, name, collection, output_dir)
                 })?;
         }
 
         if render_all || targets.is_some_and(|t| should_render(t, &RenderTarget::Pagination)) {
-            self.render_pagination(site, output_dir)?;
+            render_pagination(&self.tera, site, output_dir)?;
         }
 
         if render_all || targets.is_some_and(|t| t.contains(&RenderTarget::AllTaxonomies)) {
@@ -433,16 +381,16 @@ impl ThemeEngine {
         }
 
         if render_all {
-            self.render_404(site, output_dir)?;
+            render_404(&self.tera, site, output_dir)?;
         }
 
         if render_all || targets.is_some_and(|t| should_render(t, &RenderTarget::SearchIndex)) {
-            self.render_search(site, output_dir)?;
+            render_search(&self.tera, site, output_dir)?;
         }
 
         if render_all {
             self.copy_theme_static(output_dir)?;
-            self.copy_assets(&site.assets, output_dir)?;
+            copy_assets(&site.assets, output_dir)?;
         }
 
         if render_all || targets.is_some_and(|t| should_render(t, &RenderTarget::Feeds)) {
@@ -494,308 +442,6 @@ impl ThemeEngine {
         Ok(())
     }
 
-    fn render_index(&self, site: &Site, output_dir: &Path) -> Result<()> {
-        let posts_per_page = site.config.posts_per_page;
-        let index_posts: Vec<&crate::types::Post> =
-            site.posts.iter().take(posts_per_page).collect();
-        let total_pages = if posts_per_page > 0 && !site.posts.is_empty() {
-            site.posts.len().div_ceil(posts_per_page)
-        } else {
-            1
-        };
-        let base_url = site.config.base_url.trim_end_matches('/');
-
-        let mut context = Context::new();
-        let metadata = site_metadata(site);
-        context.insert("site", &metadata);
-        context.insert("posts", &index_posts);
-        context.insert("current_page", &1usize);
-        context.insert("total_pages", &total_pages);
-
-        if total_pages > 1 {
-            let next_url = format!("{}/page/2/", base_url);
-            context.insert("next_page_url", &next_url);
-        }
-
-        let template_name = if let Some(home) = &site.home {
-            context.insert("home", home);
-            context.insert("page", home);
-            home.content.template.as_deref().unwrap_or("index.html")
-        } else {
-            "index.html"
-        };
-
-        let rendered = self.tera.render(template_name, &context)?;
-        let output_path = output_dir.join("index.html");
-
-        fs::write(output_path, rendered)?;
-
-        Ok(())
-    }
-
-    fn render_page(&self, site: &Site, page: &crate::types::Page, output_dir: &Path) -> Result<()> {
-        let mut context = Context::new();
-        let metadata = site_metadata(site);
-        context.insert("site", &metadata);
-        context.insert("page", page);
-        let math = site.config.math || page.content.frontmatter.get_bool("math").unwrap_or(false);
-        context.insert("math", &math);
-
-        let template_name = page.content.template.as_deref().unwrap_or("page.html");
-        let rendered = self.tera.render(template_name, &context)?;
-
-        let output_path = output_dir.join(&page.content.path);
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(output_path, rendered)?;
-
-        Ok(())
-    }
-
-    fn render_post(
-        &self,
-        site: &Site,
-        post: &crate::types::Post,
-        prev_post: Option<&crate::types::Post>,
-        next_post: Option<&crate::types::Post>,
-        output_dir: &Path,
-    ) -> Result<()> {
-        let mut context = Context::new();
-        let metadata = site_metadata(site);
-        context.insert("site", &metadata);
-        context.insert("post", post);
-        let math = site.config.math || post.content.frontmatter.get_bool("math").unwrap_or(false);
-        context.insert("math", &math);
-
-        if let Some(prev) = prev_post {
-            context.insert("prev_post", prev);
-        }
-        if let Some(next) = next_post {
-            context.insert("next_post", next);
-        }
-
-        let related = related_posts(site, post, 3);
-        context.insert("related_posts", &related);
-
-        let template_name = post.content.template.as_deref().unwrap_or("post.html");
-        let rendered = self.tera.render(template_name, &context)?;
-
-        let output_path = output_dir.join(&post.content.path);
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(output_path, rendered)?;
-
-        Ok(())
-    }
-
-    fn render_pagination(&self, site: &Site, output_dir: &Path) -> Result<()> {
-        let posts_per_page = site.config.posts_per_page;
-        if posts_per_page == 0 || site.posts.is_empty() {
-            return Ok(());
-        }
-
-        let total_pages = site.posts.len().div_ceil(posts_per_page);
-        let base_url = site.config.base_url.trim_end_matches('/');
-        let metadata = site_metadata(site);
-
-        for page_number in 2..=total_pages {
-            let start = (page_number - 1) * posts_per_page;
-            let end = (start + posts_per_page).min(site.posts.len());
-            let page_posts = &site.posts[start..end];
-
-            let mut context = Context::new();
-            context.insert("site", &metadata);
-            context.insert("posts", page_posts);
-            context.insert("current_page", &page_number);
-            context.insert("total_pages", &total_pages);
-
-            let prev_url = if page_number == 2 {
-                format!("{}/", base_url)
-            } else {
-                format!("{}/page/{}/", base_url, page_number - 1)
-            };
-            context.insert("prev_page_url", &prev_url);
-
-            if page_number < total_pages {
-                let next_url = format!("{}/page/{}/", base_url, page_number + 1);
-                context.insert("next_page_url", &next_url);
-            }
-
-            let rendered = self.tera.render("pagination.html", &context)?;
-            let page_dir = output_dir.join("page").join(page_number.to_string());
-            fs::create_dir_all(&page_dir)?;
-            fs::write(page_dir.join("index.html"), rendered)?;
-        }
-
-        Ok(())
-    }
-
-    fn render_404(&self, site: &Site, output_dir: &Path) -> Result<()> {
-        let mut context = Context::new();
-        let metadata = site_metadata(site);
-        context.insert("site", &metadata);
-
-        let four_oh_four_page = site.pages.iter().find(|page| page.content.slug == "404");
-        if let Some(page) = four_oh_four_page {
-            context.insert("page", page);
-        }
-
-        let rendered = self.tera.render("404.html", &context)?;
-        fs::write(output_dir.join("404.html"), rendered)?;
-
-        Ok(())
-    }
-
-    fn render_search(&self, site: &Site, output_dir: &Path) -> Result<()> {
-        let search_dir = output_dir.join("search");
-        let search_index = search_dir.join("index.html");
-
-        let mut context = Context::new();
-        let metadata = site_metadata(site);
-        context.insert("site", &metadata);
-
-        let rendered = self.tera.render("search.html", &context)?;
-        fs::create_dir_all(&search_dir)?;
-        fs::write(search_index, rendered)?;
-
-        Ok(())
-    }
-
-    fn render_collection(
-        &self,
-        site: &Site,
-        name: &str,
-        collection: &crate::types::Collection,
-        output_dir: &Path,
-    ) -> Result<()> {
-        let metadata = site_metadata(site);
-        let items_per_page = site.config.posts_per_page;
-        let base_url = site.config.base_url.trim_end_matches('/');
-
-        let effective_per_page = if items_per_page == 0 {
-            collection.items.len().max(1)
-        } else {
-            items_per_page
-        };
-
-        let total_pages = if collection.items.is_empty() {
-            1
-        } else {
-            collection.items.len().div_ceil(effective_per_page)
-        };
-
-        for page_number in 1..=total_pages {
-            let start = (page_number - 1) * effective_per_page;
-            let end = (start + effective_per_page).min(collection.items.len());
-            let page_items = &collection.items[start..end];
-
-            let mut context = Context::new();
-            context.insert("site", &metadata);
-            context.insert("collection", collection);
-            context.insert("collection_name", name);
-            context.insert("items", &page_items);
-            context.insert("current_page", &page_number);
-            context.insert("total_pages", &total_pages);
-
-            if page_number > 1 {
-                let prev_url = if page_number == 2 {
-                    format!("{}/{}/", base_url, name)
-                } else {
-                    format!("{}/{}/page/{}/", base_url, name, page_number - 1)
-                };
-                context.insert("prev_page_url", &prev_url);
-            }
-
-            if page_number < total_pages {
-                let next_url = format!("{}/{}/page/{}/", base_url, name, page_number + 1);
-                context.insert("next_page_url", &next_url);
-            }
-
-            let rendered = self.tera.render("collection.html", &context)?;
-
-            if page_number == 1 {
-                let index_path = output_dir.join(name).join("index.html");
-                if let Some(parent) = index_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(index_path, rendered)?;
-            } else {
-                let page_dir = output_dir
-                    .join(name)
-                    .join("page")
-                    .join(page_number.to_string());
-                fs::create_dir_all(&page_dir)?;
-                fs::write(page_dir.join("index.html"), rendered)?;
-            }
-        }
-
-        for item in &collection.items {
-            self.render_collection_item(site, name, collection, item, output_dir)?;
-        }
-
-        Ok(())
-    }
-
-    fn render_collection_item(
-        &self,
-        site: &Site,
-        collection_name: &str,
-        collection: &crate::types::Collection,
-        item: &crate::types::CollectionItem,
-        output_dir: &Path,
-    ) -> Result<()> {
-        let mut context = Context::new();
-        let metadata = site_metadata(site);
-        context.insert("site", &metadata);
-        context.insert("item", item);
-        context.insert("collection", collection);
-        context.insert("collection_name", collection_name);
-        let math = site.config.math || item.content.frontmatter.get_bool("math").unwrap_or(false);
-        context.insert("math", &math);
-
-        let template_name = item
-            .content
-            .template
-            .as_deref()
-            .unwrap_or("collection_item.html");
-
-        let template_name = if self
-            .tera
-            .get_template_names()
-            .any(|name| name == template_name)
-        {
-            template_name
-        } else {
-            context.insert("page", item);
-            "page.html"
-        };
-
-        let rendered = self.tera.render(template_name, &context)?;
-        let output_path = output_dir.join(&item.content.path);
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(output_path, rendered)?;
-
-        Ok(())
-    }
-
-    fn copy_assets(&self, assets: &[Asset], output_dir: &Path) -> Result<()> {
-        for asset in assets {
-            let dest = output_dir.join(&asset.dest);
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(&asset.source, &dest)?;
-        }
-
-        Ok(())
-    }
-
     fn copy_theme_static(&self, output_dir: &Path) -> Result<()> {
         self.copy_static_dir(&self.theme_static_dir, output_dir)?;
         self.copy_static_dir(&self.override_static_dir, output_dir)?;
@@ -828,65 +474,6 @@ impl ThemeEngine {
 
         Ok(())
     }
-}
-
-fn register_custom_filters(tera: &mut Tera) {
-    tera.register_filter(
-        "reading_time",
-        |value: &tera::Value, _args: &HashMap<String, tera::Value>| {
-            let raw_text = value.as_str().unwrap_or("");
-            let plain_text = crate::search::strip_html_tags(raw_text);
-            let words = crate::parsing::word_count(&plain_text);
-            let result = crate::parsing::reading_time(words);
-            Ok(tera::Value::Number(serde_json::Number::from(result)))
-        },
-    );
-
-    tera.register_filter(
-        "word_count",
-        |value: &tera::Value, _args: &HashMap<String, tera::Value>| {
-            let raw_text = value.as_str().unwrap_or("");
-            let plain_text = crate::search::strip_html_tags(raw_text);
-            let count = crate::parsing::word_count(&plain_text);
-            Ok(tera::Value::Number(serde_json::Number::from(count)))
-        },
-    );
-
-    tera.register_filter(
-        "toc",
-        |value: &tera::Value, _args: &HashMap<String, tera::Value>| {
-            let empty = Vec::new();
-            let entries = value.as_array().unwrap_or(&empty);
-            let mut html = String::from("<ul class=\"toc\">\n");
-            for entry in entries {
-                let level = entry.get("level").and_then(|v| v.as_u64()).unwrap_or(1);
-                let id = entry
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let title = entry
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let indent = "  ".repeat(level as usize);
-                let escaped_title = crate::xml::escape(title);
-                let escaped_id = crate::xml::escape(id);
-                html.push_str(&format!(
-                    "{indent}<li class=\"toc-level-{level}\"><a href=\"#{escaped_id}\">{escaped_title}</a></li>\n"
-                ));
-            }
-            html.push_str("</ul>");
-            Ok(tera::Value::String(html))
-        },
-    );
-
-    tera.register_filter(
-        "slugify",
-        |value: &tera::Value, _args: &HashMap<String, tera::Value>| {
-            let text = value.as_str().unwrap_or("");
-            Ok(tera::Value::String(slugify(text)))
-        },
-    );
 }
 
 fn escape_glob_path(path: &str) -> String {
@@ -1152,7 +739,6 @@ mod tests {
                     slug: "about".to_string(),
                     title: "About".to_string(),
                     html: "<p>About page</p>".to_string(),
-                    raw_content: "About page".to_string(),
                     frontmatter: Frontmatter::default(),
                     path: PathBuf::from("about/index.html"),
                     template: None,
@@ -1161,6 +747,7 @@ mod tests {
                     reading_time: 1,
                     toc: vec![],
                     url: "/about/".to_string(),
+                    excerpt: None,
                 },
                 draft: false,
                 redirect_from: vec![],
@@ -1170,7 +757,6 @@ mod tests {
                     slug: "hello".to_string(),
                     title: "Hello".to_string(),
                     html: "<p>Hello world</p>".to_string(),
-                    raw_content: "Hello world".to_string(),
                     frontmatter: Frontmatter::default(),
                     path: PathBuf::from("posts/hello/index.html"),
                     template: None,
@@ -1179,9 +765,9 @@ mod tests {
                     reading_time: 1,
                     toc: vec![],
                     url: "/posts/hello/".to_string(),
+                    excerpt: Some("Hello world".to_string()),
                 },
                 date,
-                excerpt: Some("Hello world".to_string()),
                 draft: false,
                 tags: vec!["test".to_string()],
                 categories: vec!["general".to_string()],
@@ -1233,7 +819,6 @@ mod tests {
                     slug: format!("post-{}", index),
                     title: format!("Post {}", index),
                     html: format!("<p>Post {}</p>", index),
-                    raw_content: format!("Post {}", index),
                     frontmatter: Frontmatter::default(),
                     path: PathBuf::from(format!("posts/post-{}/index.html", index)),
                     template: None,
@@ -1242,9 +827,9 @@ mod tests {
                     reading_time: 1,
                     toc: vec![],
                     url: format!("/posts/post-{}/", index),
+                    excerpt: None,
                 },
                 date,
-                excerpt: None,
                 draft: false,
                 tags: vec![],
                 categories: vec![],
@@ -1298,7 +883,6 @@ mod tests {
                     slug: format!("item-{}", index),
                     title: format!("Item {}", index),
                     html: format!("<p>Item {}</p>", index),
-                    raw_content: format!("Item {}", index),
                     frontmatter: Frontmatter::default(),
                     path: PathBuf::from(format!("docs/item-{}/index.html", index)),
                     template: None,
@@ -1307,6 +891,7 @@ mod tests {
                     reading_time: 1,
                     toc: vec![],
                     url: format!("/docs/item-{}/", index),
+                    excerpt: None,
                 },
             })
             .collect();

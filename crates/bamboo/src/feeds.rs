@@ -1,7 +1,6 @@
 //! RSS 2.0 and Atom feed generation for a built [`Site`].
 
 use crate::error::Result;
-use crate::parsing::extract_excerpt;
 use crate::types::{Collection, Site};
 use crate::xml::escape;
 use std::fs;
@@ -16,7 +15,7 @@ pub fn generate_rss(site: &Site, output_dir: &Path) -> Result<()> {
     for post in &site.posts {
         let post_url = format!("{}/posts/{}/", base_url, post.content.slug);
         let pub_date = post.date.format("%a, %d %b %Y %H:%M:%S +0000").to_string();
-        let description = escape(post.excerpt.as_deref().unwrap_or(""));
+        let description = escape(post.content.excerpt.as_deref().unwrap_or(""));
 
         items.push_str(&format!(
             r#"    <item>
@@ -73,7 +72,7 @@ pub fn generate_atom(site: &Site, output_dir: &Path) -> Result<()> {
     let mut entries = String::new();
     for post in &site.posts {
         let post_url = format!("{}/posts/{}/", base_url, post.content.slug);
-        let summary = post.excerpt.as_deref().unwrap_or("");
+        let summary = post.content.excerpt.as_deref().unwrap_or("");
 
         entries.push_str(&format!(
             r#"  <entry>
@@ -136,7 +135,7 @@ pub fn generate_collection_rss(
     for item in &collection.items {
         let item_url = format!("{}{}", base_url, item.content.url);
 
-        let description = extract_excerpt(&item.content.raw_content, 200).unwrap_or_default();
+        let description = item.content.excerpt.clone().unwrap_or_default();
 
         let mut item_xml = format!(
             "    <item>\n      <title>{}</title>\n      <link>{}</link>\n      <guid>{}</guid>\n      <description>{}</description>\n",
@@ -318,7 +317,6 @@ mod tests {
                     slug: "hello-world".to_string(),
                     title: "Hello World".to_string(),
                     html: "<p>Hello</p>".to_string(),
-                    raw_content: "Hello".to_string(),
                     frontmatter: Frontmatter::default(),
                     path: PathBuf::from("posts/hello-world/index.html"),
                     template: None,
@@ -327,9 +325,9 @@ mod tests {
                     reading_time: 1,
                     toc: vec![],
                     url: "/posts/hello-world/".to_string(),
+                    excerpt: Some("Hello excerpt".to_string()),
                 },
                 date,
-                excerpt: Some("Hello excerpt".to_string()),
                 draft: false,
                 tags: vec!["test".to_string()],
                 categories: vec![],
@@ -403,7 +401,6 @@ mod tests {
                     slug: "intro".to_string(),
                     title: "Introduction".to_string(),
                     html: "<p>Welcome</p>".to_string(),
-                    raw_content: "Welcome".to_string(),
                     frontmatter,
                     path: PathBuf::from("docs/intro/index.html"),
                     template: None,
@@ -412,6 +409,7 @@ mod tests {
                     reading_time: 1,
                     toc: vec![],
                     url: "/docs/intro/".to_string(),
+                    excerpt: Some("Welcome".to_string()),
                 },
             }],
         }
@@ -456,7 +454,6 @@ mod tests {
                     slug: "note-1".to_string(),
                     title: "Note One".to_string(),
                     html: "<p>A note</p>".to_string(),
-                    raw_content: "A note".to_string(),
                     frontmatter: Frontmatter::default(),
                     path: PathBuf::from("notes/note-1/index.html"),
                     template: None,
@@ -465,6 +462,7 @@ mod tests {
                     reading_time: 1,
                     toc: vec![],
                     url: "/notes/note-1/".to_string(),
+                    excerpt: Some("A note".to_string()),
                 },
             }],
         };
