@@ -716,7 +716,6 @@ impl SiteBuilder {
 
         Ok(CollectionItem { content })
     }
-
 }
 
 #[cfg(test)]

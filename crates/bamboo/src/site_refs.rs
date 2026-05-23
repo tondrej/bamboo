@@ -76,18 +76,18 @@ pub(crate) fn build_ref_registry(
         {
             "/".to_string()
         } else if is_in_posts {
-            let (_, slug) = if let Some(parsed) = crate::parsing::parse_date_from_filename(&filename)
-            {
-                parsed
-            } else {
-                (
-                    String::new(),
-                    filename
-                        .strip_suffix(".md")
-                        .unwrap_or(&filename)
-                        .to_string(),
-                )
-            };
+            let (_, slug) =
+                if let Some(parsed) = crate::parsing::parse_date_from_filename(&filename) {
+                    parsed
+                } else {
+                    (
+                        String::new(),
+                        filename
+                            .strip_suffix(".md")
+                            .unwrap_or(&filename)
+                            .to_string(),
+                    )
+                };
             format!("/posts/{}/", slug)
         } else if is_in_collection {
             let relative_to_content = path
