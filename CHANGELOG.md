@@ -1,3 +1,12 @@
+## [0.5.10] - 2026-05-25
+
+### 🚀 Features
+
+- *(parsing)* Resolve Zola-style @/path.md internal links to absolute permalinks
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to v0.5.10
 ## [0.5.9] - 2026-05-25
 
 ### 🐛 Bug Fixes
@@ -15,6 +24,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Bump version to v0.5.9
+- Update changelog for v0.5.9
 ## [0.5.8] - 2026-05-22
 
 ### 🐛 Bug Fixes
