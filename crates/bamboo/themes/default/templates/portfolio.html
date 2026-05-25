@@ -95,18 +95,18 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
           </svg>
         </label>
-      </div>
-      <div class="hidden peer-checked:flex peer-checked:flex-col peer-checked:absolute peer-checked:top-16 peer-checked:left-0 peer-checked:right-0 peer-checked:bg-gray-100 dark:peer-checked:bg-gray-800 peer-checked:border-b peer-checked:border-gray-300 dark:peer-checked:border-gray-700 peer-checked:p-4 peer-checked:space-y-4 md:hidden">
-        <a href="#about" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">About</a>
-        {% if has_highlights %}<a href="#highlights" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Highlights</a>{% endif %}
-        {% if has_experience %}<a href="#experience" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Experience</a>{% endif %}
-        {% if has_skills %}<a href="#skills" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Skills</a>{% endif %}
-        {% if has_crates %}<a href="#crates" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Crates</a>{% endif %}
-        {% if has_projects %}<a href="#projects" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Projects</a>{% endif %}
-        {% if has_education %}<a href="#education" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Education</a>{% endif %}
-        {% if articles_url %}<a href="{{ articles_url | safe }}" target="_blank" rel="noopener noreferrer" class="text-blue-500 dark:text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 transition-colors">Articles</a>{% endif %}
-        {% if sponsor_url %}<a href="{{ sponsor_url | safe }}" target="_blank" rel="noopener noreferrer" class="text-pink-500 dark:text-pink-400 hover:text-pink-600 transition-colors">Sponsor</a>{% endif %}
-        {% if source_url %}<a href="{{ source_url | safe }}" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">View source on GitHub</a>{% endif %}
+        <div class="hidden peer-checked:flex peer-checked:flex-col peer-checked:absolute peer-checked:top-16 peer-checked:left-0 peer-checked:right-0 peer-checked:bg-gray-100 dark:peer-checked:bg-gray-800 peer-checked:border-b peer-checked:border-gray-300 dark:peer-checked:border-gray-700 peer-checked:p-4 peer-checked:space-y-4 md:hidden">
+          <a href="#about" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">About</a>
+          {% if has_highlights %}<a href="#highlights" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Highlights</a>{% endif %}
+          {% if has_experience %}<a href="#experience" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Experience</a>{% endif %}
+          {% if has_skills %}<a href="#skills" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Skills</a>{% endif %}
+          {% if has_crates %}<a href="#crates" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Crates</a>{% endif %}
+          {% if has_projects %}<a href="#projects" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Projects</a>{% endif %}
+          {% if has_education %}<a href="#education" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">Education</a>{% endif %}
+          {% if articles_url %}<a href="{{ articles_url | safe }}" target="_blank" rel="noopener noreferrer" class="text-blue-500 dark:text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 transition-colors">Articles</a>{% endif %}
+          {% if sponsor_url %}<a href="{{ sponsor_url | safe }}" target="_blank" rel="noopener noreferrer" class="text-pink-500 dark:text-pink-400 hover:text-pink-600 transition-colors">Sponsor</a>{% endif %}
+          {% if source_url %}<a href="{{ source_url | safe }}" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-gray-300 hover:text-blue-500 dark:hover:text-blue-400 transition-colors">View source on GitHub</a>{% endif %}
+        </div>
       </div>
     </div>
   </nav>
