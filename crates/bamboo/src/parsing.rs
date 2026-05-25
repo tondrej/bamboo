@@ -6,7 +6,7 @@
 use crate::error::{BambooError, Result};
 use crate::types::{Frontmatter, TocEntry};
 use chrono::NaiveDate;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -22,6 +22,7 @@ pub struct MarkdownRenderer {
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     theme_name: String,
+    base_url: String,
 }
 
 impl Default for MarkdownRenderer {
@@ -47,6 +48,7 @@ impl MarkdownRenderer {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             theme_name: "base16-ocean.dark".to_string(),
+            base_url: String::new(),
         }
     }
 
@@ -63,7 +65,14 @@ impl MarkdownRenderer {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set,
             theme_name: theme_name.to_string(),
+            base_url: String::new(),
         })
+    }
+
+    /// Sets the site base URL used to resolve Zola-style `@/path/to/file.md`
+    /// internal links into absolute permalinks.
+    pub fn set_base_url(&mut self, base_url: &str) {
+        self.base_url = base_url.trim_end_matches('/').to_string();
     }
 
     /// Renders `content` as markdown and collects heading information for
@@ -91,6 +100,7 @@ impl MarkdownRenderer {
         let theme = &self.theme_set.themes[&self.theme_name];
 
         for event in parser {
+            let event = self.rewrite_internal_link(event);
             match event {
                 Event::Start(Tag::Heading { level, .. }) => {
                     in_heading = true;
@@ -196,6 +206,83 @@ impl MarkdownRenderer {
             html: html_output,
             toc,
         }
+    }
+
+    fn rewrite_internal_link<'a>(&self, event: Event<'a>) -> Event<'a> {
+        match event {
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => Event::Start(Tag::Link {
+                link_type,
+                dest_url: self.resolve_internal_link(dest_url),
+                title,
+                id,
+            }),
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => Event::Start(Tag::Image {
+                link_type,
+                dest_url: self.resolve_internal_link(dest_url),
+                title,
+                id,
+            }),
+            other => other,
+        }
+    }
+
+    fn resolve_internal_link<'a>(&self, dest_url: CowStr<'a>) -> CowStr<'a> {
+        let Some(rest) = dest_url.strip_prefix("@/") else {
+            return dest_url;
+        };
+        let (path_part, suffix) = match rest.find(['#', '?']) {
+            Some(index) => (&rest[..index], &rest[index..]),
+            None => (rest, ""),
+        };
+        if !path_part.ends_with(".md") {
+            return dest_url;
+        }
+        let url_path = content_path_to_url_path(path_part);
+        let base = self.base_url.trim_end_matches('/');
+        let target = if url_path.is_empty() {
+            format!("{base}/")
+        } else {
+            format!("{base}/{url_path}/")
+        };
+        CowStr::from(format!("{target}{suffix}"))
+    }
+}
+
+fn content_path_to_url_path(path_part: &str) -> String {
+    let normalized = path_part.replace('\\', "/");
+    let mut segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    let Some(filename) = segments.pop() else {
+        return String::new();
+    };
+    let directories = segments;
+
+    if filename == "_index.md" {
+        return directories.join("/");
+    }
+
+    let in_posts = directories == ["posts"];
+    let file_slug = if in_posts {
+        parse_date_from_filename(filename)
+            .map(|(_, slug)| slug)
+            .unwrap_or_else(|| filename.strip_suffix(".md").unwrap_or(filename).to_string())
+    } else {
+        filename.strip_suffix(".md").unwrap_or(filename).to_string()
+    };
+
+    if directories.is_empty() {
+        file_slug
+    } else {
+        format!("{}/{}", directories.join("/"), file_slug)
     }
 }
 
@@ -741,6 +828,53 @@ mod tests {
 
     fn render(input: &str) -> RenderedMarkdown {
         MarkdownRenderer::new().render(input)
+    }
+
+    fn render_with_base_url(input: &str, base_url: &str) -> RenderedMarkdown {
+        let mut renderer = MarkdownRenderer::new();
+        renderer.set_base_url(base_url);
+        renderer.render(input)
+    }
+
+    #[test]
+    fn test_internal_post_link_resolves_with_base_url() {
+        let input =
+            "see [part 2](@/posts/2026-05-22-breakout-as-plain-data-power-ups.md) for more";
+        let output = render_with_base_url(input, "https://matthewberger.dev/articles");
+        assert!(output.html.contains(
+            "href=\"https://matthewberger.dev/articles/posts/breakout-as-plain-data-power-ups/\""
+        ));
+        assert!(!output.html.contains("@/"));
+    }
+
+    #[test]
+    fn test_internal_post_link_preserves_fragment() {
+        let input = "[anchor](@/posts/2026-04-07-build-your-own-ecs-archetype-storage.md#storage)";
+        let output = render_with_base_url(input, "https://example.com");
+        assert!(output.html.contains(
+            "href=\"https://example.com/posts/build-your-own-ecs-archetype-storage/#storage\""
+        ));
+    }
+
+    #[test]
+    fn test_internal_page_link_keeps_directory_without_date_strip() {
+        let input = "[about](@/about.md) and [nested](@/guides/2026-01-01-intro.md)";
+        let output = render_with_base_url(input, "https://example.com");
+        assert!(output.html.contains("href=\"https://example.com/about/\""));
+        assert!(
+            output
+                .html
+                .contains("href=\"https://example.com/guides/2026-01-01-intro/\"")
+        );
+    }
+
+    #[test]
+    fn test_external_and_non_markdown_links_unchanged() {
+        let input = "[gh](https://github.com/x) and [css](/style.css) and [rel](../other/)";
+        let output = render_with_base_url(input, "https://example.com");
+        assert!(output.html.contains("href=\"https://github.com/x\""));
+        assert!(output.html.contains("href=\"/style.css\""));
+        assert!(output.html.contains("href=\"../other/\""));
     }
 
     #[test]

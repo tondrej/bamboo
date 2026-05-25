@@ -116,7 +116,9 @@ impl SiteBuilder {
             config.base_url = url.trim_end_matches('/').to_string();
         }
 
-        self.renderer = Some(MarkdownRenderer::with_theme(&config.syntax_theme)?);
+        let mut renderer = MarkdownRenderer::with_theme(&config.syntax_theme)?;
+        renderer.set_base_url(&config.base_url);
+        self.renderer = Some(renderer);
         self.math_enabled = config.math;
 
         if self.shortcode_processor.is_none() {
