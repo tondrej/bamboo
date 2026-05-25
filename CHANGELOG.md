@@ -1,3 +1,20 @@
+## [0.5.9] - 2026-05-25
+
+### 🐛 Bug Fixes
+
+- *(theme)* Make portfolio mobile menu a sibling of nav-toggle so hamburger opens
+
+### 🚜 Refactor
+
+- Split theme/site, drop raw_content, move excerpt to Content
+
+### 🎨 Styling
+
+- Apply cargo fmt to refactored modules
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to v0.5.9
 ## [0.5.8] - 2026-05-22
 
 ### 🐛 Bug Fixes
@@ -7,6 +24,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Bump version to v0.5.8
+- Update changelog for v0.5.8
 ## [0.5.7] - 2026-05-16
 
 ### 🐛 Bug Fixes
