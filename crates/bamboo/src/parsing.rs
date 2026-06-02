@@ -838,8 +838,7 @@ mod tests {
 
     #[test]
     fn test_internal_post_link_resolves_with_base_url() {
-        let input =
-            "see [part 2](@/posts/2026-05-22-breakout-as-plain-data-power-ups.md) for more";
+        let input = "see [part 2](@/posts/2026-05-22-breakout-as-plain-data-power-ups.md) for more";
         let output = render_with_base_url(input, "https://matthewberger.dev/articles");
         assert!(output.html.contains(
             "href=\"https://matthewberger.dev/articles/posts/breakout-as-plain-data-power-ups/\""
