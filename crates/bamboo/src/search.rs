@@ -139,11 +139,12 @@ fn truncate_content(content: &str, max_chars: usize) -> String {
 /// [`SearchEntry`] per page and post.
 pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
     let mut entries: Vec<SearchEntry> = Vec::new();
+    let base_url = site.config.base_url.trim_end_matches('/');
 
     if let Some(ref home) = site.home {
         entries.push(SearchEntry {
             title: home.content.title.clone(),
-            url: home.content.url.clone(),
+            url: format!("{}{}", base_url, home.content.url.clone()),
             tags: Vec::new(),
             date: String::new(),
             excerpt: String::new(),
@@ -157,7 +158,7 @@ pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
     for post in &site.posts {
         entries.push(SearchEntry {
             title: post.content.title.clone(),
-            url: post.content.url.clone(),
+            url: format!("{}{}", base_url, post.content.url.clone()),
             tags: post.tags.clone(),
             date: post.date.format("%Y-%m-%d").to_string(),
             excerpt: post.content.excerpt.clone().unwrap_or_default(),
@@ -174,7 +175,7 @@ pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
         }
         entries.push(SearchEntry {
             title: page.content.title.clone(),
-            url: page.content.url.clone(),
+            url: format!("{}{}", base_url, page.content.url.clone()),
             tags: Vec::new(),
             date: String::new(),
             excerpt: String::new(),
@@ -189,7 +190,7 @@ pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
         for item in &collection.items {
             entries.push(SearchEntry {
                 title: item.content.title.clone(),
-                url: item.content.url.clone(),
+                url: format!("{}{}", base_url, item.content.url.clone()),
                 tags: Vec::new(),
                 date: String::new(),
                 excerpt: String::new(),
