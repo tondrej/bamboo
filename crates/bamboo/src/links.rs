@@ -17,6 +17,14 @@ pub struct LinkWarning {
 impl std::fmt::Display for LinkWarning {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let source_display = self.source.to_string_lossy().replace('\\', "/");
+        if self.href.starts_with("@/") {
+            return write!(
+                formatter,
+                "unresolved internal link '{}' in {} (use the source file name with .md, \
+                 e.g. @/posts/2024-01-01-hello.md)",
+                self.href, source_display
+            );
+        }
         write!(
             formatter,
             "broken link '{}' in {}",
@@ -28,6 +36,8 @@ impl std::fmt::Display for LinkWarning {
 /// Walks every HTML file under `output_dir` and returns a list of internal
 /// references that don't resolve to a file inside the output tree. External
 /// links (different host) and fragment-only links (`#anchor`) are skipped.
+/// Links that still start with `@/` were not resolved by the markdown
+/// renderer and are always reported.
 ///
 /// `ignore_prefixes` lists path prefixes (e.g. `"/other-project"`) that the
 /// validator should treat as external even when they appear to share the
@@ -66,6 +76,17 @@ pub fn validate_internal_links(
         let relative = path.strip_prefix(output_dir).unwrap_or(path).to_path_buf();
 
         for href in extract_hrefs(&content) {
+            if href.starts_with("@/") {
+                let key = (relative.clone(), href.clone());
+                if seen.insert(key) {
+                    warnings.push(LinkWarning {
+                        source: relative.clone(),
+                        href,
+                    });
+                }
+                continue;
+            }
+
             let normalized = normalize_href(&href, base_url_trimmed);
             let normalized = match normalized {
                 Some(normalized) => normalized,
@@ -138,6 +159,19 @@ fn normalize_href<'a>(href: &'a str, base_url: &str) -> Option<&'a str> {
         return None;
     }
     if href.starts_with('/') {
+        // Links written with the base path only (e.g. `/blog/about/` for
+        // `https://example.com/blog`) are relative to the output root.
+        let base_path = crate::images::base_path(base_url);
+        if !base_path.is_empty()
+            && let Some(path) = href.strip_prefix(base_path)
+            && (path.is_empty() || path.starts_with('/') || path.starts_with('#'))
+        {
+            return if path.is_empty() {
+                Some("/")
+            } else {
+                Some(path)
+            };
+        }
         return Some(href);
     }
     None
@@ -159,6 +193,10 @@ fn link_resolves(output_dir: &Path, href: &str) -> bool {
     output_dir.join(trimmed).join("index.html").exists()
 }
 
+/// Collects `href` attribute values. Handles double-quoted, single-quoted
+/// and unquoted values (minified HTML drops the quotes), decodes HTML
+/// entities such as `&#x2F;`, and ignores attributes that only end in
+/// `href`, such as `data-href`.
 fn extract_hrefs(html: &str) -> Vec<String> {
     let mut hrefs = Vec::new();
     let bytes = html.as_bytes();
@@ -166,28 +204,44 @@ fn extract_hrefs(html: &str) -> Vec<String> {
     let mut position = 0;
 
     while position < length {
-        if let Some(offset) = find_subsequence(&bytes[position..], b"href=") {
-            position += offset + 5;
-            if position >= length {
+        let Some(offset) = find_subsequence(&bytes[position..], b"href=") else {
+            break;
+        };
+        let attribute_start = position + offset;
+        position = attribute_start + 5;
+
+        let is_standalone = attribute_start == 0 || {
+            let previous = bytes[attribute_start - 1];
+            !(previous.is_ascii_alphanumeric() || previous == b'-' || previous == b'_')
+        };
+        if !is_standalone || position >= length {
+            continue;
+        }
+
+        let quote = bytes[position];
+        let (start, end) = if quote == b'"' || quote == b'\'' {
+            let start = position + 1;
+            let mut end = start;
+            while end < length && bytes[end] != quote {
+                end += 1;
+            }
+            if end >= length {
                 break;
             }
-            let quote = bytes[position];
-            if quote != b'"' && quote != b'\'' {
-                continue;
-            }
-            position += 1;
-            let start = position;
-            while position < length && bytes[position] != quote {
-                position += 1;
-            }
-            if position < length {
-                let href = String::from_utf8_lossy(&bytes[start..position]).to_string();
-                hrefs.push(href);
-                position += 1;
-            }
+            position = end + 1;
+            (start, end)
         } else {
-            break;
-        }
+            let start = position;
+            let mut end = start;
+            while end < length && !bytes[end].is_ascii_whitespace() && bytes[end] != b'>' {
+                end += 1;
+            }
+            position = end;
+            (start, end)
+        };
+
+        let raw = String::from_utf8_lossy(&bytes[start..end]);
+        hrefs.push(crate::xml::unescape(&raw));
     }
 
     hrefs
@@ -230,6 +284,77 @@ mod tests {
         let html = r#"<a href="https://example.com">Ext</a><a href="/local/">Local</a>"#;
         let hrefs = extract_hrefs(html);
         assert_eq!(hrefs, vec!["https://example.com", "/local/"]);
+    }
+
+    #[test]
+    fn test_extract_hrefs_unquoted() {
+        let html = "<a href=/about/>About</a><a href=https://example.com/x class=y>X</a>";
+        let hrefs = extract_hrefs(html);
+        assert_eq!(hrefs, vec!["/about/", "https://example.com/x"]);
+    }
+
+    #[test]
+    fn test_extract_hrefs_decodes_entities() {
+        let html = r#"<a href="https:&#x2F;&#x2F;example.com&#x2F;a?b=1&amp;c=2">A</a>"#;
+        let hrefs = extract_hrefs(html);
+        assert_eq!(hrefs, vec!["https://example.com/a?b=1&c=2"]);
+    }
+
+    #[test]
+    fn test_extract_hrefs_ignores_data_href() {
+        let html = r#"<div data-href="/nope/"></div><a href="/yes/">Y</a>"#;
+        let hrefs = extract_hrefs(html);
+        assert_eq!(hrefs, vec!["/yes/"]);
+    }
+
+    #[test]
+    fn test_extract_hrefs_empty_unquoted_before_tag_end() {
+        let html = "<a href=>Empty</a>";
+        let hrefs = extract_hrefs(html);
+        assert_eq!(hrefs, vec![""]);
+    }
+
+    #[test]
+    fn test_normalize_href_base_path_only() {
+        let base_url = "https://example.com/blog";
+        assert_eq!(normalize_href("/blog/about/", base_url), Some("/about/"));
+        assert_eq!(normalize_href("/blog", base_url), Some("/"));
+        assert_eq!(normalize_href("/blog#top", base_url), Some("#top"));
+        assert_eq!(normalize_href("/blogger/", base_url), Some("/blogger/"));
+        assert_eq!(normalize_href("/other/", base_url), Some("/other/"));
+    }
+
+    #[test]
+    fn test_validate_reports_unresolved_at_links() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("index.html"),
+            "<a href=@/posts/hello>A</a><a href=@/posts/hello>B</a>",
+        )
+        .unwrap();
+
+        let warnings = validate_internal_links(dir.path(), "https://example.com", &[]);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].href, "@/posts/hello");
+        assert!(warnings[0].to_string().contains("unresolved internal link"));
+    }
+
+    #[test]
+    fn test_validate_checks_minified_links() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("about")).unwrap();
+        fs::write(dir.path().join("about/index.html"), "<html></html>").unwrap();
+        fs::write(
+            dir.path().join("index.html"),
+            "<a href=https://example.com/blog/about/>A</a>\
+             <a href=https://example.com/blog/missing/>M</a>\
+             <a href=/blog/about/>B</a>",
+        )
+        .unwrap();
+
+        let warnings = validate_internal_links(dir.path(), "https://example.com/blog", &[]);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].href, "/missing/");
     }
 
     #[test]

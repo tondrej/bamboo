@@ -432,7 +432,7 @@ fn find_tag_end(html: &str) -> Option<usize> {
 
 /// Path component of `base_url` without a trailing slash, e.g. `/blog` for
 /// `https://example.com/blog/`, or an empty string for a root site.
-fn base_path(base_url: &str) -> &str {
+pub(crate) fn base_path(base_url: &str) -> &str {
     let without_scheme = base_url
         .split_once("://")
         .map(|(_, rest)| rest)
