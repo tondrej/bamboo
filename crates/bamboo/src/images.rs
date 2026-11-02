@@ -91,7 +91,19 @@ fn is_generated_variant(path: &Path, configured_widths: &[u32]) -> bool {
         if let Some(digits) = suffix.strip_suffix('w')
             && let Ok(width) = digits.parse::<u32>()
         {
-            return configured_widths.contains(&width);
+            if configured_widths.contains(&width) {
+                return true;
+            }
+            // Full-width variants use the original's width, which is not in
+            // the configured list. Detect them by the sibling original file.
+            let base_stem = &stem[..suffix_start];
+            let parent = path.parent().unwrap_or(Path::new(""));
+            return IMAGE_EXTENSIONS.iter().any(|extension| {
+                parent.join(format!("{base_stem}.{extension}")).is_file()
+                    || parent
+                        .join(format!("{base_stem}.{}", extension.to_uppercase()))
+                        .is_file()
+            });
         }
     }
     false
@@ -143,15 +155,26 @@ pub fn process_images(output_dir: &Path, config: &ImageConfig) -> Result<ImageMa
 
             let mut image_variants = Vec::new();
 
-            for &target_width in &config.widths {
-                if target_width >= original_width {
-                    continue;
-                }
+            // Widths smaller than the original, plus the original width itself,
+            // so the browser can still select a full-size image from srcset.
+            let mut target_widths: Vec<u32> = config
+                .widths
+                .iter()
+                .copied()
+                .filter(|&width| width < original_width)
+                .collect();
+            if !target_widths.is_empty() {
+                target_widths.push(original_width);
+            }
 
-                let scale_factor = target_width as f64 / original_width as f64;
-                let target_height = (original_height as f64 * scale_factor).round() as u32;
-                let resized =
-                    source_image.resize_exact(target_width, target_height, FilterType::Lanczos3);
+            for target_width in target_widths {
+                let resized = if target_width == original_width {
+                    source_image.clone()
+                } else {
+                    let scale_factor = target_width as f64 / original_width as f64;
+                    let target_height = (original_height as f64 * scale_factor).round() as u32;
+                    source_image.resize_exact(target_width, target_height, FilterType::Lanczos3)
+                };
 
                 for format in &config.formats {
                     let variant_filename = format!("{}-{}w.{}", stem, target_width, format);
@@ -304,7 +327,17 @@ fn format_to_mime(format: &str) -> &'static str {
 /// Walks every HTML file under `output_dir` and rewrites `<img>` tags for
 /// images present in `manifest` to include the matching `srcset`, so the
 /// browser can pick an appropriately-sized variant.
-pub fn apply_srcset_to_html(output_dir: &Path, manifest: &ImageManifest) -> Result<()> {
+///
+/// `base_url` is the site's base URL. An `<img src>` may be written with the
+/// full base URL (`https://example.com/blog/images/a.png`), with the base
+/// path only (`/blog/images/a.png`) or relative to the site root
+/// (`/images/a.png`). Variant URLs in the generated `srcset` are prefixed
+/// with `base_url`.
+pub fn apply_srcset_to_html(
+    output_dir: &Path,
+    manifest: &ImageManifest,
+    base_url: &str,
+) -> Result<()> {
     if manifest.variants.is_empty() {
         return Ok(());
     }
@@ -321,7 +354,7 @@ pub fn apply_srcset_to_html(output_dir: &Path, manifest: &ImageManifest) -> Resu
         }
 
         let content = fs::read_to_string(path)?;
-        let updated = replace_img_tags_with_srcset(&content, manifest);
+        let updated = replace_img_tags_with_srcset(&content, manifest, base_url);
 
         if updated != content {
             fs::write(path, updated)?;
@@ -397,7 +430,42 @@ fn find_tag_end(html: &str) -> Option<usize> {
     None
 }
 
-fn replace_img_tags_with_srcset(html: &str, manifest: &ImageManifest) -> String {
+/// Path component of `base_url` without a trailing slash, e.g. `/blog` for
+/// `https://example.com/blog/`, or an empty string for a root site.
+fn base_path(base_url: &str) -> &str {
+    let without_scheme = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url);
+    match without_scheme.find('/') {
+        Some(position) => without_scheme[position..].trim_end_matches('/'),
+        None => "",
+    }
+}
+
+/// Converts an `<img src>` value to the output-relative key used in the
+/// [`ImageManifest`] (e.g. `images/a.png`).
+fn manifest_key<'a>(src: &'a str, base_url: &str) -> &'a str {
+    let base_url = base_url.trim_end_matches('/');
+    let base_path = base_path(base_url);
+    let site_relative = if !base_url.is_empty()
+        && let Some(rest) = src.strip_prefix(base_url)
+        && rest.starts_with('/')
+    {
+        rest
+    } else if !base_path.is_empty()
+        && let Some(rest) = src.strip_prefix(base_path)
+        && rest.starts_with('/')
+    {
+        rest
+    } else {
+        src
+    };
+    site_relative.trim_start_matches('/')
+}
+
+fn replace_img_tags_with_srcset(html: &str, manifest: &ImageManifest, base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
     let mut output = String::with_capacity(html.len());
     let mut remaining = html;
 
@@ -410,7 +478,7 @@ fn replace_img_tags_with_srcset(html: &str, manifest: &ImageManifest) -> String 
             let img_tag = &remaining[..tag_length];
 
             if let Some(src) = extract_src_attribute(img_tag) {
-                let normalized = src.trim_start_matches('/');
+                let normalized = manifest_key(&src, base_url);
                 if manifest.variants.contains_key(normalized) {
                     let image_variants = &manifest.variants[normalized];
                     let mut formats_seen: Vec<String> = Vec::new();
@@ -444,7 +512,8 @@ fn replace_img_tags_with_srcset(html: &str, manifest: &ImageManifest) -> String 
                                 .iter()
                                 .map(|variant| {
                                     format!(
-                                        "/{} {}w",
+                                        "{}/{} {}w",
+                                        crate::xml::escape(base_url),
                                         crate::xml::escape(&variant.path),
                                         variant.width
                                     )
@@ -582,9 +651,133 @@ mod tests {
         );
         let manifest = ImageManifest { variants };
         let html = r#"<p><img src="/images/photo.jpg"></p>"#;
-        let result = replace_img_tags_with_srcset(html, &manifest);
+        let result = replace_img_tags_with_srcset(html, &manifest, "");
         assert!(result.contains("<picture>"));
         assert!(result.contains("</picture>"));
+    }
+
+    fn photo_manifest() -> ImageManifest {
+        let mut variants = HashMap::new();
+        variants.insert(
+            "images/photo.jpg".to_string(),
+            vec![ImageVariant {
+                path: "images/photo-320w.webp".to_string(),
+                width: 320,
+                format: "webp".to_string(),
+            }],
+        );
+        ImageManifest { variants }
+    }
+
+    #[test]
+    fn test_base_path() {
+        assert_eq!(base_path("https://example.com"), "");
+        assert_eq!(base_path("https://example.com/"), "");
+        assert_eq!(base_path("https://example.com/blog"), "/blog");
+        assert_eq!(base_path("https://example.com/blog/"), "/blog");
+        assert_eq!(base_path("http://localhost:3000"), "");
+        assert_eq!(base_path(""), "");
+    }
+
+    #[test]
+    fn test_manifest_key() {
+        let base_url = "https://example.com/blog";
+        assert_eq!(
+            manifest_key("https://example.com/blog/images/a.png", base_url),
+            "images/a.png"
+        );
+        assert_eq!(manifest_key("/blog/images/a.png", base_url), "images/a.png");
+        assert_eq!(manifest_key("/images/a.png", base_url), "images/a.png");
+        assert_eq!(manifest_key("/images/a.png", ""), "images/a.png");
+        assert_eq!(
+            manifest_key("/blogger/images/a.png", base_url),
+            "blogger/images/a.png"
+        );
+        assert_eq!(
+            manifest_key("https://other.com/images/a.png", base_url),
+            "https://other.com/images/a.png"
+        );
+    }
+
+    #[test]
+    fn test_replace_img_tags_with_srcset_full_base_url() {
+        let manifest = photo_manifest();
+        let html = r#"<p><img src="https://example.com/blog/images/photo.jpg"></p>"#;
+        let result = replace_img_tags_with_srcset(html, &manifest, "https://example.com/blog");
+        assert!(result.contains("<picture>"));
+        assert!(
+            result.contains(r#"srcset="https://example.com/blog/images/photo-320w.webp 320w""#)
+        );
+    }
+
+    #[test]
+    fn test_replace_img_tags_with_srcset_escaped_src() {
+        let manifest = photo_manifest();
+        let html =
+            r#"<img src="https:&#x2F;&#x2F;example.com&#x2F;blog&#x2F;images&#x2F;photo.jpg">"#;
+        let result = replace_img_tags_with_srcset(html, &manifest, "https://example.com/blog/");
+        assert!(result.contains("<picture>"));
+    }
+
+    #[test]
+    fn test_replace_img_tags_with_srcset_base_path() {
+        let manifest = photo_manifest();
+        let html = r#"<img src="/blog/images/photo.jpg">"#;
+        let result = replace_img_tags_with_srcset(html, &manifest, "https://example.com/blog");
+        assert!(result.contains("<picture>"));
+    }
+
+    #[test]
+    fn test_replace_img_tags_with_srcset_external_image_untouched() {
+        let manifest = photo_manifest();
+        let html = r#"<img src="https://other.com/images/photo.jpg">"#;
+        let result = replace_img_tags_with_srcset(html, &manifest, "https://example.com/blog");
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn test_process_images_adds_original_width_variant() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let images_dir = dir.path().join("images");
+        fs::create_dir_all(&images_dir).unwrap();
+        image::RgbImage::new(600, 300)
+            .save(images_dir.join("chart.png"))
+            .unwrap();
+
+        let config = ImageConfig {
+            widths: vec![320, 640, 1024],
+            quality: 80,
+            formats: vec!["jpg".to_string()],
+        };
+        let manifest = process_images(dir.path(), &config).unwrap();
+
+        let variants = &manifest.variants["images/chart.png"];
+        let mut widths: Vec<u32> = variants.iter().map(|variant| variant.width).collect();
+        widths.sort();
+        assert_eq!(widths, vec![320, 600]);
+        assert!(images_dir.join("chart-600w.jpg").is_file());
+        assert!(is_generated_variant(
+            &images_dir.join("chart-600w.jpg"),
+            &config.widths
+        ));
+    }
+
+    #[test]
+    fn test_process_images_skips_small_image() {
+        let dir = tempfile::TempDir::new().unwrap();
+        image::RgbImage::new(200, 100)
+            .save(dir.path().join("icon.png"))
+            .unwrap();
+
+        let config = ImageConfig {
+            widths: vec![320, 640],
+            quality: 80,
+            formats: vec!["jpg".to_string()],
+        };
+        let manifest = process_images(dir.path(), &config).unwrap();
+
+        assert!(manifest.variants.is_empty());
+        assert!(!dir.path().join("icon-200w.jpg").exists());
     }
 
     #[test]

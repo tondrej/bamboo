@@ -418,7 +418,7 @@ impl ThemeEngine {
             && render_all
         {
             let manifest = images::process_images(output_dir, image_config)?;
-            images::apply_srcset_to_html(output_dir, &manifest)?;
+            images::apply_srcset_to_html(output_dir, &manifest, &site.config.base_url)?;
         }
 
         if render_all {
