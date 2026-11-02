@@ -255,7 +255,14 @@ pub fn expand_targets(classification: &ChangeClassification) -> HashSet<RenderTa
                     let components: Vec<&str> = relative.split('/').collect();
 
                     if components.len() >= 2 {
+                        // The directory is either a collection (it has a
+                        // `_collection.toml`) or holds nested pages. This
+                        // function cannot see the file system, so target
+                        // both: a target that matches nothing renders nothing.
                         targets.insert(RenderTarget::Collection(components[0].to_string()));
+                        if let Some(slug) = nested_page_slug(&components) {
+                            targets.insert(RenderTarget::Page(slug));
+                        }
                     } else {
                         let filename = components[0];
                         let slug = filename.strip_suffix(".md").unwrap_or(filename);
@@ -274,6 +281,20 @@ pub fn expand_targets(classification: &ChangeClassification) -> HashSet<RenderTa
 
             targets
         }
+    }
+}
+
+/// Slug of a nested page from its path components below `content/`, using
+/// the same rules as page loading: `guides/x.md` → `guides/x`,
+/// `guides/_index.md` → `guides`. Returns `None` for non-markdown files.
+fn nested_page_slug(components: &[&str]) -> Option<String> {
+    let (filename, directories) = components.split_last()?;
+    let file_slug = filename.strip_suffix(".md")?;
+    let directory_part = directories.join("/");
+    if file_slug == "_index" {
+        Some(directory_part)
+    } else {
+        Some(format!("{directory_part}/{file_slug}"))
     }
 }
 
@@ -529,6 +550,27 @@ mod tests {
         assert!(targets.contains(&RenderTarget::Sitemap));
         assert!(targets.contains(&RenderTarget::SearchIndex));
         assert!(!targets.contains(&RenderTarget::Pagination));
+    }
+
+    #[test]
+    fn test_expand_targets_nested_page_change() {
+        let targets = expand_targets(&ChangeClassification::Targeted {
+            changed_files: vec![
+                PathBuf::from("content/guides/getting-started.md"),
+                PathBuf::from("content/guides/_index.md"),
+                PathBuf::from("content/guides/deep/topic.md"),
+            ],
+        });
+
+        assert!(targets.contains(&RenderTarget::Page("guides/getting-started".to_string())));
+        assert!(targets.contains(&RenderTarget::Page("guides".to_string())));
+        assert!(targets.contains(&RenderTarget::Page("guides/deep/topic".to_string())));
+        assert!(targets.contains(&RenderTarget::Collection("guides".to_string())));
+    }
+
+    #[test]
+    fn test_nested_page_slug_ignores_non_markdown() {
+        assert_eq!(nested_page_slug(&["guides", "image.png"]), None);
     }
 
     #[test]
