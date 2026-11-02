@@ -7,7 +7,8 @@ use bamboo_ssg::{
     compute_content_hashes_with_theme, expand_targets, load_cache, save_cache,
     validate_internal_links,
 };
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -18,6 +19,39 @@ use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(300);
+
+/// Short description of a watcher event for the "Changes detected" line,
+/// e.g. `Modify(Data(Any)) content/about.md`.
+fn describe_event(event: &notify::Result<Event>) -> String {
+    match event {
+        Ok(event) => {
+            let paths: Vec<String> = event
+                .paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            format!("{:?} {}", event.kind, paths.join(", "))
+        }
+        Err(error) => format!("watch error: {error}"),
+    }
+}
+
+/// Returns `true` for watcher events that can mean a file changed.
+///
+/// On Linux, `notify` also reports when a file is opened or closed after
+/// reading. A rebuild reads the watched files itself, so treating those
+/// events as changes makes `serve` rebuild and reload in an endless loop.
+/// Closing a file after writing it is kept, as that is how a save shows up.
+fn is_relevant_event(event: &notify::Result<Event>) -> bool {
+    match event {
+        Ok(event) => match event.kind {
+            EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+            EventKind::Access(_) => false,
+            _ => true,
+        },
+        Err(_) => true,
+    }
+}
 
 fn escape_toml_string(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
@@ -226,7 +260,7 @@ fn build_site_incremental(
     drafts: bool,
     base_url: Option<&str>,
     cached_state: Option<&BuildState>,
-) -> std::result::Result<BuildState, Box<dyn std::error::Error>> {
+) -> std::result::Result<(BuildState, bool), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
     let new_hashes = compute_content_hashes_with_theme(input, Path::new(theme))?;
@@ -236,9 +270,12 @@ fn build_site_incremental(
         let target_set = expand_targets(&classification);
         if target_set.is_empty() {
             println!("No changes detected, skipping rebuild.");
-            return Ok(BuildState {
-                content_hashes: new_hashes,
-            });
+            return Ok((
+                BuildState {
+                    content_hashes: new_hashes,
+                },
+                false,
+            ));
         }
         if target_set.contains(&bamboo_ssg::RenderTarget::All) {
             clean_output_dir(output)?;
@@ -283,7 +320,15 @@ fn build_site_incremental(
         builder = builder.theme_templates_dir(&theme_templates);
     }
 
-    let site = builder.build()?;
+    let mut site = builder.build()?;
+
+    // Fingerprinting renames style.css (e.g. to style.d88facd4.css) and
+    // rewrites links only during a full build. An incremental rebuild would
+    // then write pages that link to a style.css that no longer exists.
+    // Minification also runs only in full builds. Neither is needed for a
+    // local preview, so keep serve output consistent by turning both off.
+    site.config.fingerprint = false;
+    site.config.minify = false;
 
     let override_dir = input.to_path_buf();
     let theme_engine = ThemeEngine::new_with_overrides(theme, &override_dir)?;
@@ -298,9 +343,12 @@ fn build_site_incremental(
         elapsed
     );
 
-    Ok(BuildState {
-        content_hashes: new_hashes,
-    })
+    Ok((
+        BuildState {
+            content_hashes: new_hashes,
+        },
+        true,
+    ))
 }
 
 pub async fn serve_site(
@@ -332,7 +380,7 @@ pub async fn serve_site(
         Some(&serve_base_url),
         initial_cache.as_ref(),
     ) {
-        Ok(new_state) => {
+        Ok((new_state, _)) => {
             let _ = save_cache(&input_dir, &new_state);
             if let Ok(mut guard) = cached_state.lock() {
                 *guard = Some(new_state);
@@ -397,16 +445,37 @@ pub async fn serve_site(
     std::thread::spawn(move || {
         loop {
             match notify_rx.recv() {
-                Ok(_event) => {
+                Ok(event) => {
+                    if !is_relevant_event(&event) {
+                        continue;
+                    }
+
+                    // Wait until no relevant event has arrived for
+                    // DEBOUNCE_DURATION. Read-only events do not extend
+                    // the wait.
+                    let mut deadline = Instant::now() + DEBOUNCE_DURATION;
                     loop {
-                        match notify_rx.recv_timeout(DEBOUNCE_DURATION) {
-                            Ok(_) => continue,
+                        let timeout = deadline.saturating_duration_since(Instant::now());
+                        match notify_rx.recv_timeout(timeout) {
+                            Ok(event) => {
+                                if is_relevant_event(&event) {
+                                    deadline = Instant::now() + DEBOUNCE_DURATION;
+                                }
+                            }
                             Err(RecvTimeoutError::Timeout) => break,
                             Err(RecvTimeoutError::Disconnected) => return,
                         }
                     }
 
-                    println!("Changes detected, rebuilding...");
+                    println!(
+                        "Changes detected ({}), rebuilding...",
+                        describe_event(&event)
+                    );
+
+                    let had_error = error_state_clone
+                        .lock()
+                        .map(|guard| guard.is_some())
+                        .unwrap_or(false);
 
                     let previous_state = cached_state_clone
                         .lock()
@@ -421,7 +490,7 @@ pub async fn serve_site(
                         Some(&serve_url),
                         previous_state.as_ref(),
                     ) {
-                        Ok(new_state) => {
+                        Ok((new_state, rendered)) => {
                             let _ = save_cache(&input_dir_clone, &new_state);
                             if let Ok(mut guard) = cached_state_clone.lock() {
                                 *guard = Some(new_state);
@@ -429,15 +498,20 @@ pub async fn serve_site(
                             if let Ok(mut guard) = error_state_clone.lock() {
                                 *guard = None;
                             }
+                            // Reload when pages changed, or when an error
+                            // page is showing and must go away.
+                            if rendered || had_error {
+                                let _ = reload_tx_clone.send(());
+                            }
                         }
                         Err(error) => {
                             eprintln!("Rebuild error: {error}");
                             if let Ok(mut guard) = error_state_clone.lock() {
                                 *guard = Some(error.to_string());
                             }
+                            let _ = reload_tx_clone.send(());
                         }
                     }
-                    let _ = reload_tx_clone.send(());
                 }
                 Err(error) => {
                     eprintln!("Watch error: {error}");
@@ -598,6 +672,7 @@ async fn error_overlay_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
 
     #[test]
     fn test_escape_toml_string_plain() {
@@ -647,5 +722,45 @@ mod tests {
     #[test]
     fn test_escape_toml_string_bell() {
         assert_eq!(escape_toml_string("bell\u{0007}char"), "bell\\u0007char");
+    }
+
+    fn event(kind: EventKind) -> notify::Result<Event> {
+        Ok(Event::new(kind))
+    }
+
+    #[test]
+    fn test_read_events_are_ignored() {
+        assert!(!is_relevant_event(&event(EventKind::Access(
+            AccessKind::Open(AccessMode::Any)
+        ))));
+        assert!(!is_relevant_event(&event(EventKind::Access(
+            AccessKind::Close(AccessMode::Read)
+        ))));
+        assert!(!is_relevant_event(&event(EventKind::Access(
+            AccessKind::Read
+        ))));
+    }
+
+    #[test]
+    fn test_change_events_are_relevant() {
+        assert!(is_relevant_event(&event(EventKind::Access(
+            AccessKind::Close(AccessMode::Write)
+        ))));
+        assert!(is_relevant_event(&event(EventKind::Modify(
+            ModifyKind::Data(DataChange::Any)
+        ))));
+        assert!(is_relevant_event(&event(EventKind::Create(
+            CreateKind::File
+        ))));
+        assert!(is_relevant_event(&event(EventKind::Remove(
+            RemoveKind::File
+        ))));
+    }
+
+    #[test]
+    fn test_watch_errors_are_relevant() {
+        assert!(is_relevant_event(&Err(notify::Error::generic(
+            "watch failed"
+        ))));
     }
 }
