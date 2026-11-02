@@ -264,6 +264,7 @@ impl ShortcodeProcessor {
                 }
             })?;
 
+            output.push_str(&self.base_url);
             output.push_str(url);
             return Ok(&after_open[close_position + 3..]);
         }
@@ -751,6 +752,19 @@ mod tests {
         let input = r#"{{< ref path="posts/hello.md" >}}"#;
         let result = processor.process(input, &renderer()).unwrap();
         assert_eq!(result, "/posts/hello/");
+    }
+
+    #[test]
+    fn test_ref_shortcode_with_base_url() {
+        let mut processor = processor();
+        let mut registry = HashMap::new();
+        registry.insert("about.md".to_string(), "/about/".to_string());
+        processor.set_ref_registry(registry);
+        processor.set_base_url("https://example.com/blog/");
+
+        let input = r#"[About]({{< ref "about.md" >}})"#;
+        let result = processor.process(input, &renderer()).unwrap();
+        assert_eq!(result, "[About](https://example.com/blog/about/)");
     }
 
     #[test]
