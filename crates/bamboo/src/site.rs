@@ -652,7 +652,12 @@ impl SiteBuilder {
         let items: Vec<CollectionItem> = file_entries
             .par_iter()
             .map(|(path, relative)| self.parse_collection_item(path, name, relative))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|item| {
+                self.include_drafts || !item.content.frontmatter.get_bool("draft").unwrap_or(false)
+            })
+            .collect();
 
         Ok(Collection {
             name: name.to_string(),
@@ -918,6 +923,55 @@ url = "/"
         let site = builder.build().unwrap();
 
         assert_eq!(site.posts.len(), 2);
+    }
+
+    fn create_collection_with_draft(dir: &TempDir) {
+        fs::create_dir_all(dir.path().join("content/docs")).unwrap();
+        fs::write(
+            dir.path().join("content/docs/_collection.toml"),
+            "name = \"docs\"",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("content/docs/intro.md"),
+            "+++\ntitle = \"Introduction\"\n+++\n\nGetting started",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("content/docs/unfinished.md"),
+            "+++\ntitle = \"Unfinished\"\ndraft = true\n+++\n\nWork in progress",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_draft_collection_items_excluded_by_default() {
+        let dir = create_test_site();
+        create_collection_with_draft(&dir);
+
+        let mut builder = SiteBuilder::new(dir.path());
+        let site = builder.build().unwrap();
+
+        let docs = &site.collections["docs"];
+        assert_eq!(docs.items.len(), 1);
+        assert_eq!(docs.items[0].content.slug, "intro");
+    }
+
+    #[test]
+    fn test_draft_collection_items_included_when_requested() {
+        let dir = create_test_site();
+        create_collection_with_draft(&dir);
+
+        let mut builder = SiteBuilder::new(dir.path()).include_drafts(true);
+        let site = builder.build().unwrap();
+
+        let docs = &site.collections["docs"];
+        assert_eq!(docs.items.len(), 2);
+        assert!(
+            docs.items
+                .iter()
+                .any(|item| item.content.slug == "unfinished")
+        );
     }
 
     #[test]
