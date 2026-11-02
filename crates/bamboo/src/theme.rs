@@ -801,6 +801,102 @@ mod tests {
     }
 
     #[test]
+    fn test_content_page_overrides_taxonomy_index() {
+        use crate::types::*;
+        use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
+        use std::collections::HashMap;
+
+        let date = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2024, 1, 1)
+                .unwrap()
+                .and_time(NaiveTime::MIN),
+        );
+
+        let site = Site {
+            config: SiteConfig {
+                title: "Test Blog".to_string(),
+                base_url: "https://example.com".to_string(),
+                description: None,
+                author: None,
+                language: None,
+                posts_per_page: 10,
+                minify: false,
+                fingerprint: false,
+                images: None,
+                syntax_theme: crate::types::default_syntax_theme(),
+                taxonomies: crate::types::default_taxonomies(),
+                math: false,
+                favicon: None,
+                link_check_ignore: Vec::new(),
+                extra: HashMap::new(),
+            },
+            home: None,
+            pages: vec![Page {
+                content: Content {
+                    slug: "tags".to_string(),
+                    title: "Posts by Tag".to_string(),
+                    html: "<p>Custom tags page</p>".to_string(),
+                    frontmatter: Frontmatter::default(),
+                    path: PathBuf::from("tags/index.html"),
+                    template: None,
+                    weight: 0,
+                    word_count: 3,
+                    reading_time: 1,
+                    toc: vec![],
+                    url: "/tags/".to_string(),
+                    excerpt: None,
+                },
+                draft: false,
+                redirect_from: vec![],
+            }],
+            posts: vec![Post {
+                content: Content {
+                    slug: "hello".to_string(),
+                    title: "Hello".to_string(),
+                    html: "<p>Hello world</p>".to_string(),
+                    frontmatter: Frontmatter::default(),
+                    path: PathBuf::from("posts/hello/index.html"),
+                    template: None,
+                    weight: 0,
+                    word_count: 2,
+                    reading_time: 1,
+                    toc: vec![],
+                    url: "/posts/hello/".to_string(),
+                    excerpt: Some("Hello world".to_string()),
+                },
+                date,
+                draft: false,
+                tags: vec!["test".to_string()],
+                categories: vec!["general".to_string()],
+                taxonomies_map: HashMap::from([
+                    ("tags".to_string(), vec!["test".to_string()]),
+                    ("categories".to_string(), vec!["general".to_string()]),
+                ]),
+                redirect_from: vec![],
+            }],
+            collections: HashMap::new(),
+            data: HashMap::new(),
+            assets: vec![],
+        };
+
+        let output_dir = tempfile::TempDir::new().unwrap();
+        let engine = ThemeEngine::new("default").unwrap();
+        engine.render_site(&site, output_dir.path()).unwrap();
+
+        let tags_index = fs::read_to_string(output_dir.path().join("tags/index.html")).unwrap();
+        assert!(tags_index.contains("Custom tags page"));
+        assert!(output_dir.path().join("tags/test/index.html").exists());
+
+        assert!(output_dir.path().join("categories/index.html").exists());
+        assert!(
+            output_dir
+                .path()
+                .join("categories/general/index.html")
+                .exists()
+        );
+    }
+
+    #[test]
     fn test_render_pagination() {
         use crate::types::*;
         use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};

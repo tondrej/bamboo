@@ -175,18 +175,30 @@ where
         .collect();
     taxonomy_items.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let mut context = Context::new();
-    context.insert("site", metadata);
-    context.insert(taxonomy_config.taxonomy_name, &taxonomy_items);
-    context.insert("taxonomy_items", &taxonomy_items);
-    context.insert("taxonomy_name", taxonomy_config.taxonomy_name);
-
     let taxonomy_dir = output_dir.join(taxonomy_config.taxonomy_name);
-    let taxonomy_index = taxonomy_dir.join("index.html");
-    let index_template = taxonomy_config.index_template_or_fallback(tera);
-    let rendered = tera.render(index_template, &context)?;
-    fs::create_dir_all(&taxonomy_dir)?;
-    fs::write(taxonomy_index, rendered)?;
+
+    // A content page (e.g. `content/tags.md`) that renders to the taxonomy
+    // index path takes precedence over the generated index, so the site
+    // author can replace it with a custom page.
+    let index_relative = Path::new(taxonomy_config.taxonomy_name).join("index.html");
+    let page_owns_index = site
+        .pages
+        .iter()
+        .any(|page| page.content.path == index_relative);
+
+    if !page_owns_index {
+        let mut context = Context::new();
+        context.insert("site", metadata);
+        context.insert(taxonomy_config.taxonomy_name, &taxonomy_items);
+        context.insert("taxonomy_items", &taxonomy_items);
+        context.insert("taxonomy_name", taxonomy_config.taxonomy_name);
+
+        let taxonomy_index = taxonomy_dir.join("index.html");
+        let index_template = taxonomy_config.index_template_or_fallback(tera);
+        let rendered = tera.render(index_template, &context)?;
+        fs::create_dir_all(&taxonomy_dir)?;
+        fs::write(taxonomy_index, rendered)?;
+    }
 
     let posts_per_page = site.config.posts_per_page;
 
