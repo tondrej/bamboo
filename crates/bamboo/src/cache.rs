@@ -12,6 +12,10 @@ use walkdir::WalkDir;
 const CACHE_DIR_NAME: &str = ".bamboo-cache";
 const CACHE_FILE_NAME: &str = "build-state.json";
 
+/// Key prefix for files hashed from the theme directory, so they cannot
+/// collide with project-relative paths such as `templates/...`.
+const THEME_PREFIX: &str = "theme/";
+
 /// Persisted snapshot of a prior build, used to detect which files changed
 /// between runs. Serialized to `.bamboo-cache/build-state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +111,28 @@ pub fn compute_content_hashes(input_dir: &Path) -> Result<HashMap<String, String
     Ok(hashes)
 }
 
+/// Same as [`compute_content_hashes`], but also hashes every file under
+/// `theme_dir` (keyed as `theme/<path relative to theme_dir>`), so edits to a
+/// theme trigger a rebuild in `bamboo serve`. If `theme_dir` is not a
+/// directory (e.g. the built-in `default` theme), only the project files are
+/// hashed.
+pub fn compute_content_hashes_with_theme(
+    input_dir: &Path,
+    theme_dir: &Path,
+) -> Result<HashMap<String, String>> {
+    let mut hashes = compute_content_hashes(input_dir)?;
+
+    if theme_dir.is_dir() {
+        let mut theme_hashes = HashMap::new();
+        hash_directory(theme_dir, theme_dir, &mut theme_hashes)?;
+        for (relative, hash) in theme_hashes {
+            hashes.insert(format!("{THEME_PREFIX}{relative}"), hash);
+        }
+    }
+
+    Ok(hashes)
+}
+
 fn hash_file(path: &Path) -> Result<String> {
     let content = fs::read(path)?;
     let mut hasher = Sha256::new();
@@ -147,6 +173,10 @@ fn hash_directory(
 /// [`BuildState`] and decides whether the upcoming build needs to be
 /// [`Full`](ChangeClassification::Full) or
 /// [`Targeted`](ChangeClassification::Targeted).
+///
+/// Changes to `bamboo.toml`, to `templates/`, to theme files (see
+/// [`compute_content_hashes_with_theme`]) and any deleted file cause a full
+/// rebuild.
 pub fn classify_changes(
     old_hashes: &HashMap<String, String>,
     new_hashes: &HashMap<String, String>,
@@ -178,7 +208,11 @@ pub fn classify_changes(
         .iter()
         .any(|path| path.to_string_lossy().starts_with("templates/"));
 
-    if has_config_change || has_template_change || has_deletions {
+    let has_theme_change = changed_files
+        .iter()
+        .any(|path| path.to_string_lossy().starts_with(THEME_PREFIX));
+
+    if has_config_change || has_template_change || has_theme_change || has_deletions {
         return ChangeClassification::Full;
     }
 
@@ -391,6 +425,43 @@ mod tests {
     fn test_classify_changes_template_change() {
         let old = HashMap::from([("templates/base.html".to_string(), "abc".to_string())]);
         let new = HashMap::from([("templates/base.html".to_string(), "def".to_string())]);
+
+        let classification = classify_changes(&old, &new);
+        assert_eq!(classification, ChangeClassification::Full);
+    }
+
+    #[test]
+    fn test_compute_content_hashes_with_theme() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("bamboo.toml"), "title = \"Test\"").unwrap();
+        let theme = TempDir::new().unwrap();
+        fs::create_dir_all(theme.path().join("templates/partials")).unwrap();
+        fs::write(theme.path().join("templates/base.html"), "base").unwrap();
+        fs::write(theme.path().join("templates/partials/nav.html"), "nav").unwrap();
+
+        let hashes = compute_content_hashes_with_theme(dir.path(), theme.path()).unwrap();
+
+        assert!(hashes.contains_key("bamboo.toml"));
+        assert!(hashes.contains_key("theme/templates/base.html"));
+        assert!(hashes.contains_key("theme/templates/partials/nav.html"));
+        assert_eq!(hashes.len(), 3);
+    }
+
+    #[test]
+    fn test_compute_content_hashes_with_builtin_theme() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("bamboo.toml"), "title = \"Test\"").unwrap();
+
+        let hashes =
+            compute_content_hashes_with_theme(dir.path(), &dir.path().join("default")).unwrap();
+
+        assert_eq!(hashes, compute_content_hashes(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn test_classify_changes_theme_change() {
+        let old = HashMap::from([("theme/templates/base.html".to_string(), "abc".to_string())]);
+        let new = HashMap::from([("theme/templates/base.html".to_string(), "def".to_string())]);
 
         let classification = classify_changes(&old, &new);
         assert_eq!(classification, ChangeClassification::Full);

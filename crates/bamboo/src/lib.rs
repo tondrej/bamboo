@@ -56,7 +56,7 @@ pub mod xml;
 
 pub use cache::{
     BuildState, ChangeClassification, RenderTarget, classify_changes, compute_content_hashes,
-    expand_targets, load_cache, save_cache, should_render,
+    compute_content_hashes_with_theme, expand_targets, load_cache, save_cache, should_render,
 };
 pub use error::{BambooError, IoContext, Result};
 pub use links::{LinkWarning, validate_internal_links};

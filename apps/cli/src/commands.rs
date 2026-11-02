@@ -4,7 +4,8 @@ use axum::http::{Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use bamboo_ssg::{
     BuildState, SiteBuilder, ThemeEngine, classify_changes, clean_output_dir,
-    compute_content_hashes, expand_targets, load_cache, save_cache, validate_internal_links,
+    compute_content_hashes_with_theme, expand_targets, load_cache, save_cache,
+    validate_internal_links,
 };
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
@@ -228,7 +229,7 @@ fn build_site_incremental(
 ) -> std::result::Result<BuildState, Box<dyn std::error::Error>> {
     let start = Instant::now();
 
-    let new_hashes = compute_content_hashes(input)?;
+    let new_hashes = compute_content_hashes_with_theme(input, Path::new(theme))?;
 
     let targets = if let Some(previous_state) = cached_state {
         let classification = classify_changes(&previous_state.content_hashes, &new_hashes);
