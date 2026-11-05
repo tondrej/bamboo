@@ -16,7 +16,8 @@ use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_status::SetStatus;
 
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(300);
 
@@ -351,6 +352,15 @@ fn build_site_incremental(
     ))
 }
 
+/// The dev server's file service: files from `output`, `index.html` for
+/// directories, and the site's `404.html` (with status 404) for a path that
+/// has no file, as a web server configured with an error page does.
+fn static_files(output: &Path) -> ServeDir<SetStatus<ServeFile>> {
+    ServeDir::new(output)
+        .append_index_html_on_directories(true)
+        .not_found_service(ServeFile::new(output.join("404.html")))
+}
+
 pub async fn serve_site(
     theme: &str,
     input: Option<&Path>,
@@ -544,10 +554,8 @@ pub async fn serve_site(
         }
     });
 
-    let serve_dir = ServeDir::new(output).append_index_html_on_directories(true);
-
     let app = Router::new()
-        .fallback_service(serve_dir)
+        .fallback_service(static_files(output))
         .layer(middleware::from_fn(move |request, next| {
             error_overlay_middleware(error_state.clone(), request, next)
         }))
@@ -673,6 +681,46 @@ async fn error_overlay_middleware(
 mod tests {
     use super::*;
     use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+    use tower::ServiceExt;
+
+    async fn get(output: &Path, uri: &str) -> (StatusCode, String) {
+        let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let response = static_files(output).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(Body::new(response.into_body()), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_static_files_serves_404_page_for_missing_paths() {
+        let output = std::env::temp_dir().join(format!(
+            "bamboo-static-files-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&output);
+        fs::create_dir_all(output.join("posts/hello")).unwrap();
+        fs::write(output.join("index.html"), "home").unwrap();
+        fs::write(output.join("posts/hello/index.html"), "hello").unwrap();
+        fs::write(output.join("404.html"), "not found page").unwrap();
+
+        assert_eq!(get(&output, "/").await, (StatusCode::OK, "home".to_string()));
+        assert_eq!(
+            get(&output, "/posts/hello/").await,
+            (StatusCode::OK, "hello".to_string())
+        );
+        assert_eq!(
+            get(&output, "/does-not-exist/").await,
+            (StatusCode::NOT_FOUND, "not found page".to_string())
+        );
+        assert_eq!(
+            get(&output, "/posts/missing.css").await,
+            (StatusCode::NOT_FOUND, "not found page".to_string())
+        );
+
+        fs::remove_dir_all(&output).unwrap();
+    }
 
     #[test]
     fn test_escape_toml_string_plain() {
