@@ -176,9 +176,20 @@ fn update_html_references(
     Ok(())
 }
 
+/// `true` for a file that is already minified (`*.min.css`, `*.min.js`),
+/// such as a third-party library. Minifying it again gives no gain and can
+/// break it.
+fn is_already_minified(file_path: &Path) -> bool {
+    file_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.ends_with(".min"))
+}
+
 fn minify_css_files(output_dir: &Path) -> Result<()> {
     use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions, StyleSheet};
-    let css_files = collect_files_with_extension(output_dir, "css")?;
+    let mut css_files = collect_files_with_extension(output_dir, "css")?;
+    css_files.retain(|file_path| !is_already_minified(file_path));
     css_files
         .par_iter()
         .try_for_each(|file_path| -> Result<()> {
@@ -200,7 +211,8 @@ fn minify_css_files(output_dir: &Path) -> Result<()> {
 }
 
 fn minify_js_files(output_dir: &Path) -> Result<()> {
-    let js_files = collect_files_with_extension(output_dir, "js")?;
+    let mut js_files = collect_files_with_extension(output_dir, "js")?;
+    js_files.retain(|file_path| !is_already_minified(file_path));
     js_files.par_iter().try_for_each(|file_path| -> Result<()> {
         let session = minify_js::Session::new();
         let source = fs::read(file_path)?;
@@ -360,6 +372,39 @@ mod tests {
         let minified = fs::read_to_string(dir.path().join("test.css")).unwrap();
         assert!(!minified.contains('\n'));
         assert!(minified.contains("color"));
+    }
+
+    #[test]
+    fn test_already_minified_files_are_not_minified_again() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("js")).unwrap();
+        let library_js = "/* License */\nvar lib = function () {\n  return 1;\n};\n";
+        let library_css = "/* License */\nbody {\n  margin: 0;\n}\n";
+        fs::write(dir.path().join("js/library-1.0.min.js"), library_js).unwrap();
+        fs::write(dir.path().join("library.min.css"), library_css).unwrap();
+        fs::write(dir.path().join("own.js"), "function own() {\n  return 1;\n}\n").unwrap();
+
+        minify_js_files(dir.path()).unwrap();
+        minify_css_files(dir.path()).unwrap();
+
+        let js = fs::read_to_string(dir.path().join("js/library-1.0.min.js")).unwrap();
+        let css = fs::read_to_string(dir.path().join("library.min.css")).unwrap();
+        let own = fs::read_to_string(dir.path().join("own.js")).unwrap();
+        assert_eq!(js, library_js);
+        assert_eq!(css, library_css);
+        assert!(
+            own.len() < "function own() {\n  return 1;\n}\n".len(),
+            "own.js should still be minified: {own:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_already_minified() {
+        assert!(is_already_minified(Path::new("js/fuse-7.0.0.min.js")));
+        assert!(is_already_minified(Path::new("lib.min.css")));
+        assert!(!is_already_minified(Path::new("style.css")));
+        assert!(!is_already_minified(Path::new("admin.js")));
+        assert!(!is_already_minified(Path::new("minimal.js")));
     }
 
     #[test]
