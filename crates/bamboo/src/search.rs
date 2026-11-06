@@ -141,7 +141,9 @@ pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
     let mut entries: Vec<SearchEntry> = Vec::new();
     let base_url = site.config.base_url.trim_end_matches('/');
 
-    if let Some(ref home) = site.home {
+    if let Some(ref home) = site.home
+        && home.content.in_search()
+    {
         entries.push(SearchEntry {
             title: home.content.title.clone(),
             url: format!("{}{}", base_url, home.content.url.clone()),
@@ -155,7 +157,7 @@ pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
         });
     }
 
-    for post in &site.posts {
+    for post in site.posts.iter().filter(|post| post.content.in_search()) {
         entries.push(SearchEntry {
             title: post.content.title.clone(),
             url: format!("{}{}", base_url, post.content.url.clone()),
@@ -170,7 +172,7 @@ pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
     }
 
     for page in &site.pages {
-        if page.content.slug == "404" {
+        if page.content.slug == "404" || !page.content.in_search() {
             continue;
         }
         entries.push(SearchEntry {
@@ -187,7 +189,11 @@ pub fn generate_search_index(site: &Site, output_dir: &Path) -> Result<()> {
     }
 
     for collection in site.collections.values() {
-        for item in &collection.items {
+        for item in collection
+            .items
+            .iter()
+            .filter(|item| item.content.in_search())
+        {
             entries.push(SearchEntry {
                 title: item.content.title.clone(),
                 url: format!("{}{}", base_url, item.content.url.clone()),
@@ -299,5 +305,98 @@ mod tests {
         let content = std::fs::read_to_string(index_path).unwrap();
         let entries: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
         assert!(entries.is_empty());
+    }
+
+    fn content_with(slug: &str, url: &str, frontmatter: &str) -> crate::types::Content {
+        crate::types::Content {
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            html: format!("<p>{slug}</p>"),
+            frontmatter: crate::types::Frontmatter {
+                raw: toml::from_str::<std::collections::HashMap<String, serde_json::Value>>(
+                    frontmatter,
+                )
+                .unwrap(),
+            },
+            path: std::path::PathBuf::from(format!("{slug}.md")),
+            template: None,
+            weight: 0,
+            word_count: 0,
+            reading_time: 0,
+            toc: vec![],
+            url: url.to_string(),
+            excerpt: None,
+        }
+    }
+
+    #[test]
+    fn test_search_index_skips_content_with_search_false() {
+        use crate::types::*;
+        use chrono::{TimeZone, Utc};
+
+        let mut site = Site {
+            config: SiteConfig {
+                title: "Test".to_string(),
+                base_url: "https://example.com".to_string(),
+                description: None,
+                author: None,
+                language: None,
+                posts_per_page: 10,
+                minify: false,
+                fingerprint: false,
+                images: None,
+                syntax_theme: crate::types::default_syntax_theme(),
+                taxonomies: crate::types::default_taxonomies(),
+                math: false,
+                favicon: None,
+                link_check_ignore: Vec::new(),
+                extra: std::collections::HashMap::new(),
+            },
+            home: None,
+            pages: vec![],
+            posts: vec![],
+            collections: std::collections::HashMap::new(),
+            data: std::collections::HashMap::new(),
+            assets: vec![],
+        };
+        for (slug, frontmatter) in [
+            ("shown", ""),
+            ("hidden", "search = false"),
+            ("explicit", "search = true"),
+        ] {
+            site.pages.push(Page {
+                content: content_with(slug, &format!("/{slug}/"), frontmatter),
+                draft: false,
+                redirect_from: vec![],
+            });
+            site.posts.push(Post {
+                content: content_with(slug, &format!("/posts/{slug}/"), frontmatter),
+                date: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+                draft: false,
+                tags: vec![],
+                categories: vec![],
+                taxonomies_map: std::collections::HashMap::new(),
+                redirect_from: vec![],
+            });
+        }
+
+        let output_dir = tempfile::TempDir::new().unwrap();
+        generate_search_index(&site, output_dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(output_dir.path().join("search-index.json")).unwrap();
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+        let urls: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry["url"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://example.com/posts/shown/",
+                "https://example.com/posts/explicit/",
+                "https://example.com/shown/",
+                "https://example.com/explicit/",
+            ]
+        );
     }
 }

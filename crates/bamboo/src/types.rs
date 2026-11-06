@@ -205,6 +205,20 @@ pub struct Content {
     pub excerpt: Option<String>,
 }
 
+impl Content {
+    /// `false` when the frontmatter has `search = false`: the content is
+    /// left out of `search-index.json`.
+    pub fn in_search(&self) -> bool {
+        self.frontmatter.get_bool("search").unwrap_or(true)
+    }
+
+    /// `false` when the frontmatter has `sitemap = false`: the content is
+    /// left out of `sitemap.xml`.
+    pub fn in_sitemap(&self) -> bool {
+        self.frontmatter.get_bool("sitemap").unwrap_or(true)
+    }
+}
+
 /// A non-post page: either the home page (`_index.md`) or any top-level /
 /// nested page under `content/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

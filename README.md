@@ -186,6 +186,8 @@ Your content here...
 | `permalink` | string | all | Override the output URL (e.g. `/custom-path/`) |
 | `redirect_from` | array | posts, pages | Old URLs that redirect to this content |
 | `math` | bool | all | Enable LaTeX math for this page (when not globally enabled) |
+| `search` | bool | all | `false` leaves the content out of `search-index.json` (default `true`) |
+| `sitemap` | bool | all | `false` leaves the content out of `sitemap.xml` (default `true`) |
 
 ### Date from Filename
 

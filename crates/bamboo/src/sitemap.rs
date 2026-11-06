@@ -21,23 +21,25 @@ pub fn generate_sitemap(site: &Site, output_dir: &Path) -> Result<()> {
         escaped_base_url
     ));
 
+    // Pages, posts and collection items use their resolved `url`, so a
+    // `permalink` override is listed at its real address.
     for page in &site.pages {
-        if page.content.slug == "404" {
+        if page.content.slug == "404" || !page.content.in_sitemap() {
             continue;
         }
         urls.push_str(&format!(
-            "  <url>\n    <loc>{}/{}/</loc>\n  </url>\n",
+            "  <url>\n    <loc>{}{}</loc>\n  </url>\n",
             escaped_base_url,
-            escape(&page.content.slug)
+            escape(&page.content.url)
         ));
     }
 
-    for post in &site.posts {
+    for post in site.posts.iter().filter(|post| post.content.in_sitemap()) {
         let lastmod = post.date.format("%Y-%m-%d").to_string();
         urls.push_str(&format!(
-            "  <url>\n    <loc>{}/posts/{}/</loc>\n    <lastmod>{}</lastmod>\n  </url>\n",
+            "  <url>\n    <loc>{}{}</loc>\n    <lastmod>{}</lastmod>\n  </url>\n",
             escaped_base_url,
-            escape(&post.content.slug),
+            escape(&post.content.url),
             lastmod
         ));
     }
@@ -75,12 +77,15 @@ pub fn generate_sitemap(site: &Site, output_dir: &Path) -> Result<()> {
             }
         }
 
-        for item in &collection.items {
+        for item in collection
+            .items
+            .iter()
+            .filter(|item| item.content.in_sitemap())
+        {
             urls.push_str(&format!(
-                "  <url>\n    <loc>{}/{}/{}/</loc>\n  </url>\n",
+                "  <url>\n    <loc>{}{}</loc>\n  </url>\n",
                 escaped_base_url,
-                escape(name),
-                escape(&item.content.slug)
+                escape(&item.content.url)
             ));
         }
     }
@@ -390,5 +395,89 @@ mod tests {
         assert!(content.contains("/docs/page/2/"));
         assert!(content.contains("/docs/page/3/"));
         assert!(content.contains("/docs/item-0/"));
+    }
+
+    fn content_with(slug: &str, url: &str, frontmatter: &str) -> Content {
+        Content {
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            html: String::new(),
+            frontmatter: Frontmatter {
+                raw: toml::from_str::<HashMap<String, serde_json::Value>>(frontmatter).unwrap(),
+            },
+            path: PathBuf::from(format!("{slug}.md")),
+            template: None,
+            weight: 0,
+            word_count: 0,
+            reading_time: 0,
+            toc: vec![],
+            url: url.to_string(),
+            excerpt: None,
+        }
+    }
+
+    #[test]
+    fn test_sitemap_skips_content_with_sitemap_false() {
+        let mut site = minimal_site();
+        for (slug, frontmatter) in [("shown", ""), ("hidden", "sitemap = false")] {
+            site.pages.push(Page {
+                content: content_with(slug, &format!("/{slug}/"), frontmatter),
+                draft: false,
+                redirect_from: vec![],
+            });
+            let mut post = make_post(slug, vec![], vec![]);
+            post.content.frontmatter = content_with(slug, "", frontmatter).frontmatter;
+            site.posts.push(post);
+        }
+        site.collections.insert(
+            "docs".to_string(),
+            Collection {
+                name: "docs".to_string(),
+                items: vec![
+                    CollectionItem {
+                        content: content_with("intro", "/docs/intro/", ""),
+                    },
+                    CollectionItem {
+                        content: content_with(
+                            "draft-notes",
+                            "/docs/draft-notes/",
+                            "sitemap = false",
+                        ),
+                    },
+                ],
+            },
+        );
+
+        let output_dir = tempfile::TempDir::new().unwrap();
+        generate_sitemap(&site, output_dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(output_dir.path().join("sitemap.xml")).unwrap();
+        assert!(content.contains("<loc>https://example.com/shown/</loc>"));
+        assert!(content.contains("<loc>https://example.com/posts/shown/</loc>"));
+        assert!(content.contains("<loc>https://example.com/docs/intro/</loc>"));
+        assert!(!content.contains("hidden"));
+        assert!(!content.contains("draft-notes"));
+    }
+
+    #[test]
+    fn test_sitemap_uses_permalink_urls() {
+        let mut site = minimal_site();
+        site.pages.push(Page {
+            content: content_with("about", "/about-me/", r#"permalink = "/about-me/""#),
+            draft: false,
+            redirect_from: vec![],
+        });
+        let mut post = make_post("hello", vec![], vec![]);
+        post.content.url = "/blog/hello-world/".to_string();
+        site.posts.push(post);
+
+        let output_dir = tempfile::TempDir::new().unwrap();
+        generate_sitemap(&site, output_dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(output_dir.path().join("sitemap.xml")).unwrap();
+        assert!(content.contains("<loc>https://example.com/about-me/</loc>"));
+        assert!(content.contains("<loc>https://example.com/blog/hello-world/</loc>"));
+        assert!(!content.contains("<loc>https://example.com/about/</loc>"));
+        assert!(!content.contains("/posts/hello/"));
     }
 }
